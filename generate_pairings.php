@@ -20,16 +20,16 @@ $pledges = array_filter($users, fn($u) => $u['role'] === 'pledge');
 // Debug: add user count info
 $debug[] = "Found " . count($actives) . " actives and " . count($pledges) . " pledges";
 
-// Load availabilities based on selected week
+// Load availabilities based on selected week (match availability.php logic)
 if ($week === 'current') {
-    $weekStart = date('Y-m-d', strtotime('monday this week'));
-    $weekEnd   = date('Y-m-d', strtotime('sunday this week'));
+    $base = strtotime('monday this week');
     $week_label = "Current Week";
 } else {
-    $weekStart = date('Y-m-d', strtotime('next monday'));
-    $weekEnd   = date('Y-m-d', strtotime('next sunday'));
+    $base = strtotime('next Monday');
     $week_label = "Next Week";
 }
+$weekStart = date('Y-m-d', $base);
+$weekEnd = date('Y-m-d', strtotime('+6 days', $base));
 $avail_stmt = $db->prepare("SELECT user_id, slot_start FROM availabilities WHERE date(slot_start) BETWEEN ? AND ?");
 $avail_stmt->execute([$weekStart, $weekEnd]);
 $avail_rows = $avail_stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -53,7 +53,7 @@ foreach ($completed_stmt->fetchAll(PDO::FETCH_ASSOC) as $ci) {
     $completed_pairs[$ci['active_id']][$ci['pledge_id']] = true;
 }
 
-// Helper: check exact 1-hour overlap
+// Helper: check exact time slot overlap (30-minute intervals)
 function has_overlap($aSlots, $pSlots) {
     return count(array_intersect($aSlots, $pSlots)) > 0;
 }
@@ -106,21 +106,21 @@ foreach ($actives as $i => $a1) {
                 if ($p1['id'] >= $p2['id']) continue; // avoid duplicates
                 if (in_array($p1['id'], $used_pledges) || in_array($p2['id'], $used_pledges)) continue;
 
-                // Check exact hour overlap
+                // Check exact time slot overlap
                 if (!isset($availability[$a1['id']], $availability[$a2['id']], $availability[$p1['id']], $availability[$p2['id']])) {
                     $debug[] = "Skipping {$p1['name']} & {$p2['name']} — missing availability data";
                     continue;
                 }
 
-                $common_hours = array_intersect(
+                $common_slots = array_intersect(
                     $availability[$a1['id']],
                     $availability[$a2['id']],
                     $availability[$p1['id']],
                     $availability[$p2['id']]
                 );
 
-                if (!$common_hours) {
-                    $debug[] = "Skipping {$p1['name']} & {$p2['name']} — no overlapping hours";
+                if (!$common_slots) {
+                    $debug[] = "Skipping {$p1['name']} & {$p2['name']} — no overlapping time slots";
                     continue;
                 }
 
@@ -136,7 +136,7 @@ foreach ($actives as $i => $a1) {
                 $pairings[] = [
                     'actives' => $active_group,
                     'pledges' => [$p1, $p2],
-                    'hour'    => date('D H:i', min($common_hours))
+                    'time_slot' => date('D H:i', min($common_slots))
                 ];
 
                 // Mark all participants as used to prevent double-booking
@@ -176,7 +176,7 @@ $percent = min(100, (count($pairings)/21)*100);
 <title>Generate Pairings</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
-  .navbar-dark { background-color: #000; }
+  .navbar-dark { background-color: #000 !important; }
 
   /* Material Design Progress Bar */
   .loading-overlay {
@@ -276,13 +276,18 @@ $percent = min(100, (count($pairings)/21)*100);
 <!-- Week Selector -->
 <div class="mb-3">
   <div class="btn-group" role="group" aria-label="Week selector">
+    <?php 
+    // Calculate correct date ranges for display (consistent with week logic)
+    $current_base = strtotime('monday this week');
+    $next_base = strtotime('next Monday');
+    ?>
     <a href="generate_pairings.php?week=current" 
        class="btn <?= $week === 'current' ? 'btn-primary' : 'btn-outline-primary' ?>">
-       Current Week (<?= date('M j', strtotime('monday this week')) ?> - <?= date('M j', strtotime('sunday this week')) ?>)
+       Current Week (<?= date('M j', $current_base) ?> - <?= date('M j', strtotime('+6 days', $current_base)) ?>)
     </a>
     <a href="generate_pairings.php?week=next" 
        class="btn <?= $week === 'next' ? 'btn-primary' : 'btn-outline-primary' ?>">
-       Next Week (<?= date('M j', strtotime('next monday')) ?> - <?= date('M j', strtotime('next sunday')) ?>)
+       Next Week (<?= date('M j', $next_base) ?> - <?= date('M j', strtotime('+6 days', $next_base)) ?>)
     </a>
   </div>
 </div>
@@ -299,7 +304,7 @@ $percent = min(100, (count($pairings)/21)*100);
     <ul class="list-group mb-4">
     <?php foreach ($pairings as $g): ?>
         <li class="list-group-item">
-            <strong>Hour:</strong> <?=htmlspecialchars($g['hour'])?><br>
+            <strong>Time Slot:</strong> <?=htmlspecialchars($g['time_slot'])?><br>
             <strong>Actives:</strong> <?=implode(', ', array_column($g['actives'],'name'))?><br>
             <strong>Pledges:</strong> <?=implode(', ', array_column($g['pledges'],'name'))?>
         </li>

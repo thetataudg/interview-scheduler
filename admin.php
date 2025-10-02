@@ -61,13 +61,41 @@ $users = $users_stmt->fetchAll(PDO::FETCH_ASSOC);
 $actives = array_filter($users, fn($u) => $u['role'] === 'active');
 $pledges = array_filter($users, fn($u) => $u['role'] === 'pledge');
 
-// Get this week's availability
-$weekStart = date('Y-m-d', strtotime('monday this week'));
-$weekEnd   = date('Y-m-d', strtotime('sunday this week'));
+// Get availability for both current and next week
+$current_base = strtotime('monday this week');
+$next_base = strtotime('next Monday');
 
-$avail_stmt = $db->prepare("SELECT DISTINCT user_id FROM availabilities WHERE date(slot_start) BETWEEN ? AND ?");
-$avail_stmt->execute([$weekStart, $weekEnd]);
-$avail_users = array_flip($avail_stmt->fetchAll(PDO::FETCH_COLUMN));
+$current_week_start = date('Y-m-d', $current_base);
+$current_week_end = date('Y-m-d', strtotime('+6 days', $current_base));
+
+$next_week_start = date('Y-m-d', $next_base);
+$next_week_end = date('Y-m-d', strtotime('+6 days', $next_base));
+
+// Get current week availability
+$current_avail_stmt = $db->prepare("SELECT DISTINCT user_id FROM availabilities WHERE date(slot_start) BETWEEN ? AND ?");
+$current_avail_stmt->execute([$current_week_start, $current_week_end]);
+$current_avail_users = array_flip($current_avail_stmt->fetchAll(PDO::FETCH_COLUMN));
+
+// Get next week availability
+$next_avail_stmt = $db->prepare("SELECT DISTINCT user_id FROM availabilities WHERE date(slot_start) BETWEEN ? AND ?");
+$next_avail_stmt->execute([$next_week_start, $next_week_end]);
+$next_avail_users = array_flip($next_avail_stmt->fetchAll(PDO::FETCH_COLUMN));
+
+// Helper function to determine availability badge
+function getAvailabilityBadge($user_id, $current_avail, $next_avail) {
+    $has_current = isset($current_avail[$user_id]);
+    $has_next = isset($next_avail[$user_id]);
+    
+    if ($has_current && $has_next) {
+        return '<span class="badge bg-success ms-2">Both Weeks ✓</span>';
+    } elseif ($has_current && !$has_next) {
+        return '<span class="badge bg-info ms-2">Current Only</span>';
+    } elseif (!$has_current && $has_next) {
+        return '<span class="badge bg-info text-dark ms-2">Next Only</span>';
+    } else {
+        return '<span class="badge bg-warning ms-2">Missing Availability</span>';
+    }
+}
 
 // Handle logging completed interviews
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['log_interview'])) {
@@ -142,21 +170,43 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
 
   <!-- Full roster with availability highlighting -->
   <div class="card mb-4">
-    <div class="card-header">Roster & Weekly Availability</div>
+    <div class="card-header">
+      Roster & Weekly Availability 
+      <small class="text-muted">
+        (Current: <?= date('M j', $current_base) ?>-<?= date('j', strtotime('+6 days', $current_base)) ?> | 
+         Next: <?= date('M j', $next_base) ?>-<?= date('j', strtotime('+6 days', $next_base)) ?>)
+      </small>
+    </div>
     <div class="card-body">
+      <div class="mb-3">
+        <small class="text-muted">
+          <span class="badge bg-success">Both Weeks ✓</span> Has availability for both weeks |
+          <span class="badge bg-info">Current Only</span> Only current week |
+          <span class="badge bg-warning text-dark">Next Only</span> Only next week |
+          <span class="badge bg-danger">Missing Both!</span> No availability set
+        </small>
+      </div>
+      
       <h5>Actives</h5>
-      <ul>
+      <ul class="list-unstyled">
         <?php foreach ($actives as $a): ?>
-          <li style="background-color: <?=isset($avail_users[$a['id']]) ? 'transparent' : '#fff3cd'?>; padding: 4px;">
-            <a href="view_availability.php?user_id=<?=$a['id']?>"><?=$a['name']?></a>
+          <li class="py-2 border-bottom">
+            <a href="view_availability.php?user_id=<?=$a['id']?>" class="text-decoration-none">
+              <?=$a['name']?>
+            </a>
+            <?= getAvailabilityBadge($a['id'], $current_avail_users, $next_avail_users) ?>
           </li>
         <?php endforeach; ?>
       </ul>
-      <h5>Pledges</h5>
-      <ul>
+      
+      <h5 class="mt-4">Pledges</h5>
+      <ul class="list-unstyled">
         <?php foreach ($pledges as $p): ?>
-          <li style="background-color: <?=isset($avail_users[$p['id']]) ? 'transparent' : '#fff3cd'?>; padding: 4px;">
-            <a href="view_availability.php?user_id=<?=$p['id']?>"><?=$p['name']?></a>
+          <li class="py-2 border-bottom">
+            <a href="view_availability.php?user_id=<?=$p['id']?>" class="text-decoration-none">
+              <?=$p['name']?>
+            </a>
+            <?= getAvailabilityBadge($p['id'], $current_avail_users, $next_avail_users) ?>
           </li>
         <?php endforeach; ?>
       </ul>
