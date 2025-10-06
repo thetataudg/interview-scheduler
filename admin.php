@@ -87,13 +87,13 @@ function getAvailabilityBadge($user_id, $current_avail, $next_avail) {
     $has_next = isset($next_avail[$user_id]);
     
     if ($has_current && $has_next) {
-        return '<span class="badge bg-success ms-2">Both Weeks ✓</span>';
+        return '<span class="badge bg-success ms-2"><i class="fas fa-check"></i> Both Weeks</span>';
     } elseif ($has_current && !$has_next) {
-        return '<span class="badge bg-info ms-2">Current Only</span>';
+        return '<span class="badge bg-success ms-2"><i class="fas fa-check"></i> Current Only</span>';
     } elseif (!$has_current && $has_next) {
-        return '<span class="badge bg-info text-dark ms-2">Next Only</span>';
+        return '<span class="badge bg-info ms-2"><i class="fas fa-exclamation-triangle"></i> Next Only</span>';
     } else {
-        return '<span class="badge bg-warning ms-2">Missing Availability</span>';
+        return '<span class="badge bg-warning text-dark ms-2"><i class="fas fa-times"></i> Missing Both</span>';
     }
 }
 
@@ -144,8 +144,42 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
   <meta charset="utf-8">
   <title>Admin - Interview Scheduler</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
   <style>
     .navbar-dark { background-color: #000 !important; }
+    
+    /* Material Design Progress Bar */
+    .material-progress {
+      width: 300px;
+      height: 4px;
+      background: #e0e0e0;
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+      margin: 0 auto;
+    }
+    
+    .material-progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #2196F3, #21CBF3);
+      border-radius: 2px;
+      position: absolute;
+      left: -100%;
+      animation: material-indeterminate 0.8375s infinite;
+    }
+    
+    @keyframes material-indeterminate {
+      0% { left: -100%; width: 100%; }
+      50% { left: 107%; width: 100%; }
+      100% { left: 107%; width: 0%; }
+    }
+    
+    .loading-text {
+      margin-top: 20px;
+      font-size: 16px;
+      color: #666;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -180,10 +214,10 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
     <div class="card-body">
       <div class="mb-3">
         <small class="text-muted">
-          <span class="badge bg-success">Both Weeks ✓</span> Has availability for both weeks |
-          <span class="badge bg-info">Current Only</span> Only current week |
-          <span class="badge bg-warning text-dark">Next Only</span> Only next week |
-          <span class="badge bg-danger">Missing Both!</span> No availability set
+          <span class="badge bg-success"><i class="fas fa-check"></i> Both Weeks</span> Has availability for both weeks |
+          <span class="badge bg-success"><i class="fas fa-check"></i> Current Only</span> Ready for current week |
+          <span class="badge bg-info"><i class="fas fa-exclamation-triangle"></i> Next Only</span> Missing current week |
+          <span class="badge bg-warning text-dark"><i class="fas fa-times"></i> Missing Both</span> No availability set
         </small>
       </div>
       
@@ -256,9 +290,53 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
   <div class="card mb-4">
     <div class="card-header">Suggested Weekly Pairings</div>
     <div class="card-body">
-      <form method="post" action="generate_pairings.php">
-        <button class="btn btn-primary" type="submit">Generate Suggested Weekly Pairings</button>
-      </form>
+      <!-- Pairing Generation Settings -->
+      <div class="row mb-3">
+        <div class="col-md-3">
+          <label class="form-label">Week to Schedule</label>
+          <select id="weekSelect" class="form-select">
+            <?php 
+            // Calculate date ranges for display
+            $current_base = strtotime('monday this week');
+            $next_base = strtotime('next Monday');
+            ?>
+            <option value="current">Current Week (<?= date('M j', $current_base) ?> - <?= date('M j', strtotime('+6 days', $current_base)) ?>)</option>
+            <option value="next" selected>Next Week (<?= date('M j', $next_base) ?> - <?= date('M j', strtotime('+6 days', $next_base)) ?>)</option>
+          </select>
+          <small class="text-muted">Which week to generate interviews for</small>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Global Max Interviews</label>
+          <input type="number" id="globalMax" class="form-control" value="50" min="1" max="100">
+          <small class="text-muted">Total interviews to generate per week</small>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Max per Active</label>
+          <input type="number" id="activeMax" class="form-control" value="5" min="1" max="10">
+          <small class="text-muted">Max interviews per active per week</small>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Max per Pledge</label>
+          <input type="number" id="pledgeMax" class="form-control" value="5" min="1" max="10">
+          <small class="text-muted">Max interviews per pledge per week</small>
+        </div>
+      </div>
+      
+      <button id="generatePairings" class="btn btn-primary">Generate Suggested Weekly Pairings</button>
+      
+      <!-- Preloader (hidden by default) -->
+      <div id="pairingLoader" class="text-center mt-3" style="display: none;">
+        <div class="material-progress">
+          <div class="material-progress-bar"></div>
+        </div>
+        <div class="loading-text">
+          <strong>Generating Pairings</strong><br>
+          <small>Finding optimal combinations... This may take up to 30 seconds.</small>
+        </div>
+      </div>
+      
+      <!-- Results container -->
+      <div id="pairingResults" class="mt-3"></div>
     </div>
   </div>
 
@@ -304,5 +382,65 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
   </div>
 
 </div>
+
+<script>
+document.getElementById('generatePairings').addEventListener('click', function() {
+    const button = this;
+    const loader = document.getElementById('pairingLoader');
+    const results = document.getElementById('pairingResults');
+    
+    // Show loader immediately
+    button.disabled = true;
+    button.textContent = 'Generating...';
+    loader.style.display = 'block';
+    results.innerHTML = '';
+    
+    // Get the input values
+    const weekSelect = document.getElementById('weekSelect').value;
+    const globalMax = document.getElementById('globalMax').value;
+    const activeMax = document.getElementById('activeMax').value;
+    const pledgeMax = document.getElementById('pledgeMax').value;
+    
+    // Make AJAX request with parameters
+    const params = new URLSearchParams({
+        'week': weekSelect,
+        'global_max': globalMax,
+        'active_max': activeMax,
+        'pledge_max': pledgeMax
+    });
+    
+    fetch(`generate_pairings.php?week=${weekSelect}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: new URLSearchParams({
+            'global_max': globalMax,
+            'active_max': activeMax,
+            'pledge_max': pledgeMax
+        })
+    })
+    .then(response => response.text())
+    .then(html => {
+        // Hide loader
+        loader.style.display = 'none';
+        button.disabled = false;
+        button.textContent = 'Generate Suggested Weekly Pairings';
+        
+        // Show results
+        results.innerHTML = html;
+    })
+    .catch(error => {
+        // Hide loader
+        loader.style.display = 'none';
+        button.disabled = false;
+        button.textContent = 'Generate Suggested Weekly Pairings';
+        
+        // Show error
+        results.innerHTML = '<div class="alert alert-danger">Error generating pairings: ' + error.message + '</div>';
+    });
+});
+</script>
 </body>
 </html>

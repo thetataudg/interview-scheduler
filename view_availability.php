@@ -17,16 +17,18 @@ $user->execute([$user_id]);
 $user = $user->fetch(PDO::FETCH_ASSOC);
 if (!$user) die("User not found.");
 
-// Get current week availability
-$current_week_start = date('Y-m-d', strtotime('monday this week'));
-$current_week_end = date('Y-m-d', strtotime('sunday this week'));
+// Get current week availability (consistent with other files)
+$current_base = strtotime('monday this week');
+$current_week_start = date('Y-m-d', $current_base);
+$current_week_end = date('Y-m-d', strtotime('+6 days', $current_base));
 $current_avail = $db->prepare("SELECT slot_start, slot_end FROM availabilities WHERE user_id=? AND date(slot_start) BETWEEN ? AND ? ORDER BY slot_start");
 $current_avail->execute([$user_id, $current_week_start, $current_week_end]);
 $current_slots = $current_avail->fetchAll(PDO::FETCH_ASSOC);
 
-// Get next week availability  
-$next_week_start = date('Y-m-d', strtotime('next monday'));
-$next_week_end = date('Y-m-d', strtotime('next sunday'));
+// Get next week availability (consistent with other files)
+$next_base = strtotime('next Monday');
+$next_week_start = date('Y-m-d', $next_base);
+$next_week_end = date('Y-m-d', strtotime('+6 days', $next_base));
 $next_avail = $db->prepare("SELECT slot_start, slot_end FROM availabilities WHERE user_id=? AND date(slot_start) BETWEEN ? AND ? ORDER BY slot_start");
 $next_avail->execute([$user_id, $next_week_start, $next_week_end]);
 $next_slots = $next_avail->fetchAll(PDO::FETCH_ASSOC);
@@ -63,7 +65,7 @@ $next_slots = $next_avail->fetchAll(PDO::FETCH_ASSOC);
   <div class="row">
     <!-- Current Week -->
     <div class="col-md-6">
-      <h4>Current Week (<?=date('M j', strtotime($current_week_start))?> - <?=date('M j', strtotime($current_week_end))?>)</h4>
+      <h4>Current Week (<?=date('M j', $current_base)?> - <?=date('M j', strtotime('+6 days', $current_base))?>)</h4>
       <?php if ($current_slots): ?>
         <ul class="list-group mb-3">
           <?php foreach ($current_slots as $s): ?>
@@ -79,7 +81,7 @@ $next_slots = $next_avail->fetchAll(PDO::FETCH_ASSOC);
 
     <!-- Next Week -->
     <div class="col-md-6">
-      <h4>Next Week (<?=date('M j', strtotime($next_week_start))?> - <?=date('M j', strtotime($next_week_end))?>)</h4>
+      <h4>Next Week (<?=date('M j', $next_base)?> - <?=date('M j', strtotime('+6 days', $next_base))?>)</h4>
       <?php if ($next_slots): ?>
         <ul class="list-group mb-3">
           <?php foreach ($next_slots as $s): ?>
