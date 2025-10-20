@@ -25,10 +25,21 @@ $debug_mode = $_GET['debug'] ?? false; // Add ?debug=1 to URL to show debug logs
 $weeklyActiveLimit = intval($_POST['active_max'] ?? 5); // Maximum interviews per active per week
 $weeklyPledgeLimit = intval($_POST['pledge_max'] ?? 5); // Maximum interviews per pledge per week
 
+// Day exclusions (can be overridden by POST parameters)
+$excludedDaysParam = $_POST['excluded_days'] ?? '';
+$excludedDays = [];
+if (!empty($excludedDaysParam)) {
+    $excludedDays = array_map('intval', explode(',', $excludedDaysParam));
+}
+
 $debug = [];
 $debug[] = "Debug mode: " . ($debug_mode ? "ON" : "OFF");
 $debug[] = "Current execution time limit: " . ini_get('max_execution_time') . " seconds";
 $debug[] = "Week selected: $week";
+$debug[] = "Excluded days: " . (empty($excludedDays) ? "None" : implode(', ', array_map(function($day) {
+    $dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    return $dayNames[$day];
+}, $excludedDays)));
 
 // Check if this is an AJAX request
 $is_ajax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && 
@@ -77,13 +88,25 @@ $availability_data = $availability_stmt->fetchAll(PDO::FETCH_ASSOC);
 
 $debug[] = "Found " . count($availability_data) . " availability records for the selected week";
 
-// Process availability into user-based time slots
+// Process availability into user-based time slots, filtering out excluded days
 $availability = [];
+$filtered_slots_count = 0;
 foreach ($availability_data as $record) {
     $user_id = $record['user_id'];
     $slot_timestamp = strtotime($record['slot_datetime']);
+    
+    // Check if this slot falls on an excluded day
+    $dayOfWeek = intval(date('w', $slot_timestamp)); // 0 = Sunday, 1 = Monday, etc.
+    
+    if (in_array($dayOfWeek, $excludedDays)) {
+        $filtered_slots_count++;
+        continue; // Skip this slot
+    }
+    
     $availability[$user_id][] = $slot_timestamp;
 }
+
+$debug[] = "Filtered out $filtered_slots_count slots on excluded days";
 
 // Count users with availability
 $actives_with_availability = count(array_filter($actives, fn($a) => isset($availability[$a['id']])));
@@ -406,6 +429,13 @@ if ($is_ajax) {
     <div class="alert alert-success">
         <strong>✅ Pairings Generated Successfully for <?= $week_label ?>!</strong><br>
         Generated <?=count($pairings)?> pairings (max: <?=$max_pairings?>) with individual limits of <?=$weeklyActiveLimit?> per active, <?=$weeklyPledgeLimit?> per pledge.
+        <?php if (!empty($excludedDays)): ?>
+            <br><strong>Excluded days:</strong> <?php 
+            $dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            $excludedDayNames = array_map(function($day) use ($dayNames) { return $dayNames[$day]; }, $excludedDays);
+            echo implode(', ', $excludedDayNames);
+            ?>
+        <?php endif; ?>
         <br><small class="text-muted">Week: <?= date('M j', $base) ?> - <?= date('M j', strtotime('+6 days', $base)) ?></small>
     </div>
     
