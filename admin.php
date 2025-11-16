@@ -54,8 +54,7 @@ if (!isset($_SESSION['admin_logged_in'])) {
     }
 }
 
-// Get all users
-$users_stmt = $db->query("SELECT id, name, role FROM users ORDER BY role, name");
+$users_stmt = $db->query("SELECT id, name, role, COALESCE(exclude_from_pairings,0) AS exclude_from_pairings FROM users ORDER BY role, name");
 $users = $users_stmt->fetchAll(PDO::FETCH_ASSOC);
 
 $actives = array_filter($users, fn($u) => $u['role'] === 'active');
@@ -379,12 +378,23 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
     <div>
       <a class="btn btn-outline-light btn-sm" href="index.php">Home</a>
       <a class="btn btn-outline-light btn-sm" href="admin.php">Admin</a>
+      <a class="btn btn-outline-light btn-sm" href="manage_users.php">Manage Users</a>
     </div>
   </div>
 </nav>
 
 <div class="container py-4">
-  <h2>Admin Dashboard</h2>
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>Admin Dashboard</h2>
+    <div>
+      <a href="manage_users.php" class="btn btn-primary me-2">
+        <i class="fas fa-users"></i> Manage Users
+      </a>
+      <a href="availability_manager.php" class="btn btn-outline-primary">
+        <i class="fas fa-calendar-alt"></i> Availability Manager
+      </a>
+    </div>
+  </div>
   <?php if (isset($_GET['saved'])): ?>
     <div class="alert alert-success">Interview logged successfully!</div>
   <?php endif; ?>
@@ -448,7 +458,11 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
         <?php foreach ($actives as $a): ?>
           <li class="py-2 border-bottom">
             <a href="view_availability.php?user_id=<?=$a['id']?>" class="text-decoration-none">
-              <?=$a['name']?>
+              <?php if (!empty($a['exclude_from_pairings'])): ?>
+                <span class="text-muted fst-italic"><?=htmlspecialchars($a['name'])?></span>
+              <?php else: ?>
+                <?=htmlspecialchars($a['name'])?>
+              <?php endif; ?>
             </a>
             <?= getAvailabilityBadge($a['id'], $current_avail_users, $next_avail_users) ?>
           </li>
@@ -460,7 +474,11 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
         <?php foreach ($pledges as $p): ?>
           <li class="py-2 border-bottom">
             <a href="view_availability.php?user_id=<?=$p['id']?>" class="text-decoration-none">
-              <?=$p['name']?>
+              <?php if (!empty($p['exclude_from_pairings'])): ?>
+                <span class="text-muted fst-italic"><?=htmlspecialchars($p['name'])?></span>
+              <?php else: ?>
+                <?=htmlspecialchars($p['name'])?>
+              <?php endif; ?>
             </a>
             <?= getAvailabilityBadge($p['id'], $current_avail_users, $next_avail_users) ?>
           </li>
