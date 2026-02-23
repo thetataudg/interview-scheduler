@@ -2,6 +2,12 @@
 // filepath: /Applications/AMPPS/www/availability_manager.php
 require 'config.php';
 
+// Check if admin is logged in
+if (!isset($_SESSION['admin_logged_in'])) {
+    header('Location: admin.php');
+    exit;
+}
+
 // Handle AJAX requests
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json');
@@ -293,10 +299,11 @@ $next_sunday = date('Y-m-d', strtotime('sunday next week'));
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Availability Manager</title>
+    <title>Availability Manager - Interview Scheduler</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
+        .navbar-dark { background-color: #000 !important; }
         .week-card {
             transition: all 0.3s ease;
             cursor: pointer;
@@ -321,13 +328,33 @@ $next_sunday = date('Y-m-d', strtotime('sunday next week'));
         }
     </style>
 </head>
-<body class="bg-light">
-    <div class="container mt-4">
-        <div class="row">
-            <div class="col-12">
-                <h1><i class="fas fa-calendar-alt"></i> Availability Manager</h1>
-                <p class="text-muted">Copy availability data between weeks for interviews</p>
+<body>
+<nav class="navbar navbar-dark bg-dark">
+  <div class="container">
+    <a class="navbar-brand text-white" href="index.php">Interview Scheduler</a>
+    <div>
+      <a class="btn btn-outline-light btn-sm" href="index.php">Home</a>
+      <a class="btn btn-outline-light btn-sm" href="admin.php">Admin</a>
+      <a class="btn btn-outline-light btn-sm" href="manage_users.php">Manage Users</a>
+      <span class="text-white me-2">
+        <i class="fas fa-user-shield"></i> <?= htmlspecialchars($_SESSION['admin_username'] ?? 'Admin') ?>
+      </span>
+      <a class="btn btn-danger btn-sm" href="logout.php">
+        <i class="fas fa-sign-out-alt"></i> Logout
+      </a>
+    </div>
+  </div>
+</nav>
+
+<div class="container py-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2><i class="fas fa-calendar-alt"></i> Availability Manager</h2>
+                <p class="text-muted mb-0">Copy availability data between weeks for interviews</p>
             </div>
+            <a href="admin.php" class="btn btn-secondary">
+                <i class="fas fa-arrow-left"></i> Back to Admin
+            </a>
         </div>
 
         <!-- Current/Next Week Info -->

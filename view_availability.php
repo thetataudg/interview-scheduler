@@ -50,6 +50,13 @@ $next_slots = $next_avail->fetchAll(PDO::FETCH_ASSOC);
 		<div>
 			<a class="btn btn-outline-light btn-sm" href="index.php">Home</a>
 			<a class="btn btn-outline-light btn-sm" href="admin.php">Admin</a>
+			<a class="btn btn-outline-light btn-sm" href="manage_users.php">Manage Users</a>
+			<span class="text-white me-2">
+				<i class="fas fa-user-shield"></i> <?= htmlspecialchars($_SESSION['admin_username'] ?? 'Admin') ?>
+			</span>
+			<a class="btn btn-danger btn-sm" href="logout.php">
+				<i class="fas fa-sign-out-alt"></i> Logout
+			</a>
 		</div>
 	</div>
 </nav>

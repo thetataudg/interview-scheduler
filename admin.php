@@ -3,27 +3,22 @@ require 'config.php';
 
 session_start();
 
-// Multi-admin password check
+// Multi-admin username and password check
 if (!isset($_SESSION['admin_logged_in'])) {
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username']) && isset($_POST['password'])) {
+        $username = $_POST['username'];
         $password = $_POST['password'];
 
-        // Fetch all admin password hashes
-        $stmt = $db->query("SELECT password_hash FROM admin_users");
-        $hashes = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        // Fetch admin user by username
+        $stmt = $db->prepare("SELECT id, username, password_hash FROM admin_users WHERE username = ?");
+        $stmt->execute([$username]);
+        $admin = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        $authenticated = false;
-        foreach ($hashes as $hash) {
-            if (password_verify($password, $hash)) {
-                $authenticated = true;
-                break;
-            }
-        }
-
-        if ($authenticated) {
+        if ($admin && password_verify($password, $admin['password_hash'])) {
             $_SESSION['admin_logged_in'] = true;
+            $_SESSION['admin_username'] = $admin['username'];
         } else {
-            $error = "Incorrect password.";
+            $error = "Incorrect username or password.";
         }
     }
 
@@ -34,19 +29,45 @@ if (!isset($_SESSION['admin_logged_in'])) {
         <html>
         <head>
             <meta charset="utf-8">
-            <title>Admin Login</title>
+            <title>Admin Login - Interview Scheduler</title>
             <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+            <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+            <style>
+                .login-container {
+                    max-width: 400px;
+                    margin: 100px auto;
+                }
+                .login-header {
+                    text-align: center;
+                    margin-bottom: 30px;
+                }
+            </style>
         </head>
-        <body class="container py-4">
-            <h2>Admin Login</h2>
-            <?php if (!empty($error)) echo "<div class='alert alert-danger'>$error</div>"; ?>
-            <form method="post">
-                <div class="mb-3">
-                    <label>Password</label>
-                    <input type="password" class="form-control" name="password" required>
+        <body class="bg-light">
+            <div class="login-container">
+                <div class="card shadow">
+                    <div class="card-body p-4">
+                        <div class="login-header">
+                            <h2><i class="fas fa-user-shield"></i> Admin Login</h2>
+                            <p class="text-muted mb-0">Interview Scheduler</p>
+                        </div>
+                        <?php if (!empty($error)) echo "<div class='alert alert-danger'><i class='fas fa-exclamation-circle'></i> $error</div>"; ?>
+                        <form method="post">
+                            <div class="mb-3">
+                                <label class="form-label">Username</label>
+                                <input type="text" class="form-control" name="username" required autofocus>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Password</label>
+                                <input type="password" class="form-control" name="password" required>
+                            </div>
+                            <button class="btn btn-primary w-100">
+                                <i class="fas fa-sign-in-alt"></i> Login
+                            </button>
+                        </form>
+                    </div>
                 </div>
-                <button class="btn btn-primary">Login</button>
-            </form>
+            </div>
         </body>
         </html>
         <?php
@@ -379,6 +400,12 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
       <a class="btn btn-outline-light btn-sm" href="index.php">Home</a>
       <a class="btn btn-outline-light btn-sm" href="admin.php">Admin</a>
       <a class="btn btn-outline-light btn-sm" href="manage_users.php">Manage Users</a>
+      <span class="text-white me-2">
+        <i class="fas fa-user-shield"></i> <?= htmlspecialchars($_SESSION['admin_username'] ?? 'Admin') ?>
+      </span>
+      <a class="btn btn-danger btn-sm" href="logout.php">
+        <i class="fas fa-sign-out-alt"></i> Logout
+      </a>
     </div>
   </div>
 </nav>

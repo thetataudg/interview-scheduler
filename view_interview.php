@@ -53,6 +53,7 @@ if (isset($_POST['delete_interview'])) {
   <meta charset="utf-8">
   <title>View Interview #<?= $iv['id'] ?></title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
   <style>.navbar-dark { background:#000; }</style>
 </head>
 <body>
@@ -61,6 +62,12 @@ if (isset($_POST['delete_interview'])) {
     <a class="navbar-brand" href="admin.php">Interview Scheduler</a>
     <div>
       <a class="btn btn-outline-light btn-sm" href="admin.php">Back</a>
+      <span class="text-white me-2">
+        <i class="fas fa-user-shield"></i> <?= htmlspecialchars($_SESSION['admin_username'] ?? 'Admin') ?>
+      </span>
+      <a class="btn btn-danger btn-sm" href="logout.php">
+        <i class="fas fa-sign-out-alt"></i> Logout
+      </a>
     </div>
   </div>
 </nav>
