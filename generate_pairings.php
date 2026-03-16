@@ -59,10 +59,10 @@ $weekEnd = date('Y-m-d', strtotime('+6 days', $base));
 
 $debug[] = "Date range: $weekStart to $weekEnd";
 
-// Fetch users including exclude flag and filter out excluded users from pairing
-$users = $db->query("SELECT id, name, role, COALESCE(exclude_from_pairings,0) AS exclude_from_pairings FROM users ORDER BY role, name")->fetchAll(PDO::FETCH_ASSOC);
-$actives = array_filter($users, function($u){ return $u['role'] === 'active' && empty($u['exclude_from_pairings']); });
-$pledges = array_filter($users, function($u){ return $u['role'] === 'pledge' && empty($u['exclude_from_pairings']); });
+// Fetch users - FIX: Remove is_big column reference
+$users = $db->query("SELECT id, name, role FROM users ORDER BY role, name")->fetchAll(PDO::FETCH_ASSOC);
+$actives = array_filter($users, fn($u) => $u['role'] === 'active');
+$pledges = array_filter($users, fn($u) => $u['role'] === 'pledge');
 
 // Randomize order for fair distribution (remove alphabetical bias)
 shuffle($actives);
@@ -561,7 +561,7 @@ if ($is_ajax) {
     </div>
     <div class="material-progress-text">
         Generating interview pairings...<br>
-        <small>This may take several minutes</small>
+        <small>This may take up to 30 seconds</small>
     </div>
 </div>
 
