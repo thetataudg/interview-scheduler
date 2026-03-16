@@ -18,8 +18,139 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
+function getProgressFilePath($jobId) {
+    $safeJobId = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)$jobId);
+    return rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . "pairing_progress_{$safeJobId}.json";
+}
+
+function writeProgress($jobId, $explored, $total, $pairingsCreated, $status = 'running', $message = '') {
+    if (empty($jobId)) {
+        return;
+    }
+
+    $totalSafe = max(1, (int)$total);
+    $exploredSafe = max(0, (int)$explored);
+    $percent = min(100, round(($exploredSafe / $totalSafe) * 100, 2));
+
+    $payload = [
+        'job_id' => (string)$jobId,
+        'explored' => $exploredSafe,
+        'total' => $totalSafe,
+        'percent' => $percent,
+        'pairings' => max(0, (int)$pairingsCreated),
+        'status' => $status,
+        'message' => $message,
+        'updated_at' => time()
+    ];
+
+    @file_put_contents(getProgressFilePath($jobId), json_encode($payload));
+}
+
+function combinationCount($n, $r) {
+    if ($r < 0 || $n < $r) {
+        return 0;
+    }
+    if ($r === 0 || $n === $r) {
+        return 1;
+    }
+    if ($r === 1) {
+        return $n;
+    }
+    if ($r === 2) {
+        return (int)(($n * ($n - 1)) / 2);
+    }
+    if ($r === 3) {
+        return (int)(($n * ($n - 1) * ($n - 2)) / 6);
+    }
+
+    $r = min($r, $n - $r);
+    $result = 1;
+    for ($i = 1; $i <= $r; $i++) {
+        $result = ($result * ($n - $r + $i)) / $i;
+    }
+    return (int)round($result);
+}
+
+function cappedCombinations(array $ids, $size, $maxCombinations) {
+    $combinations = [];
+    $count = count($ids);
+    if ($size === 2) {
+        for ($i = 0; $i < $count; $i++) {
+            for ($j = $i + 1; $j < $count; $j++) {
+                $combinations[] = [$ids[$i], $ids[$j]];
+                if (count($combinations) >= $maxCombinations) {
+                    return $combinations;
+                }
+            }
+        }
+    } elseif ($size === 3) {
+        for ($i = 0; $i < $count; $i++) {
+            for ($j = $i + 1; $j < $count; $j++) {
+                for ($k = $j + 1; $k < $count; $k++) {
+                    $combinations[] = [$ids[$i], $ids[$j], $ids[$k]];
+                    if (count($combinations) >= $maxCombinations) {
+                        return $combinations;
+                    }
+                }
+            }
+        }
+    }
+
+    return $combinations;
+}
+
 $week = $_GET['week'] ?? 'next'; // 'current' or 'next'
 $debug_mode = $_GET['debug'] ?? false; // Add ?debug=1 to URL to show debug logs
+$jobId = $_POST['job_id'] ?? ($_GET['job_id'] ?? '');
+
+// Progress polling endpoint used by admin.php while generation is running.
+if (isset($_GET['action']) && $_GET['action'] === 'progress') {
+    header('Content-Type: application/json');
+
+    if (empty($jobId)) {
+        echo json_encode([
+            'status' => 'error',
+            'message' => 'Missing job_id',
+            'explored' => 0,
+            'total' => 1,
+            'pairings' => 0,
+            'percent' => 0
+        ]);
+        exit;
+    }
+
+    $progressFile = getProgressFilePath($jobId);
+    if (!file_exists($progressFile)) {
+        echo json_encode([
+            'status' => 'pending',
+            'message' => 'Waiting for generator to start...',
+            'explored' => 0,
+            'total' => 1,
+            'pairings' => 0,
+            'percent' => 0
+        ]);
+        exit;
+    }
+
+    $raw = @file_get_contents($progressFile);
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        $decoded = [
+            'status' => 'running',
+            'message' => 'Generating pairings...',
+            'explored' => 0,
+            'total' => 1,
+            'pairings' => 0,
+            'percent' => 0
+        ];
+    }
+
+    echo json_encode($decoded);
+    exit;
+}
+
+// Release session lock so progress polling requests can run concurrently.
+session_write_close();
 
 // Individual participation limits (can be overridden by POST parameters)
 $weeklyActiveLimit = intval($_POST['active_max'] ?? 5); // Maximum interviews per active per week
@@ -146,252 +277,265 @@ $start_time = microtime(true);
 $max_pairings = intval($_POST['global_max'] ?? 50); // Weekly cap on total interviews
 
 $debug[] = "Limits: Global max = $max_pairings, Active max = $weeklyActiveLimit, Pledge max = $weeklyPledgeLimit";
+writeProgress($jobId, 0, 1, 0, 'running', 'Preparing candidate slots...');
 
-// Step 1: Generate all possible active combinations (2-person and 3-person groups)
-$active_groups = [];
+// Build lightweight user lookup maps.
+$usersById = [];
+foreach ($users as $user) {
+    $usersById[$user['id']] = $user;
+}
 
-// 2-active combinations
-for ($i = 0; $i < count($actives); $i++) {
-    for ($j = $i + 1; $j < count($actives); $j++) {
-        $active1 = $actives[$i];
-        $active2 = $actives[$j];
-        
-        // Only include if both have availability data
-        if (isset($availability[$active1['id']]) && isset($availability[$active2['id']])) {
-            $active_groups[] = [$active1, $active2];
+$activeIds = array_values(array_column($actives, 'id'));
+$pledgeIds = array_values(array_column($pledges, 'id'));
+
+// Convert each user's 30-minute slots into 1-hour start slots (slot + next slot).
+$hourStartsByUser = [];
+foreach ($availability as $uid => $slots) {
+    if (empty($slots)) {
+        continue;
+    }
+
+    sort($slots);
+    $slotSet = array_fill_keys($slots, true);
+    foreach ($slots as $slotStart) {
+        $nextSlot = $slotStart + 1800;
+        if (isset($slotSet[$nextSlot])) {
+            $hourStartsByUser[$uid][$slotStart] = true;
         }
     }
 }
 
-// 3-active combinations  
-for ($i = 0; $i < count($actives); $i++) {
-    for ($j = $i + 1; $j < count($actives); $j++) {
-        for ($k = $j + 1; $k < count($actives); $k++) {
-            $active1 = $actives[$i];
-            $active2 = $actives[$j];
-            $active3 = $actives[$k];
-            
-            // Only include if all have availability data
-            if (isset($availability[$active1['id']]) && 
-                isset($availability[$active2['id']]) && 
-                isset($availability[$active3['id']])) {
-                $active_groups[] = [$active1, $active2, $active3];
-            }
-        }
+// Build per-hour availability lists for actives and pledges.
+$slotsToParticipants = [];
+foreach ($activeIds as $activeId) {
+    if (empty($hourStartsByUser[$activeId])) {
+        continue;
+    }
+    foreach (array_keys($hourStartsByUser[$activeId]) as $hourStart) {
+        $slotsToParticipants[$hourStart]['actives'][] = $activeId;
+    }
+}
+foreach ($pledgeIds as $pledgeId) {
+    if (empty($hourStartsByUser[$pledgeId])) {
+        continue;
+    }
+    foreach (array_keys($hourStartsByUser[$pledgeId]) as $hourStart) {
+        $slotsToParticipants[$hourStart]['pledges'][] = $pledgeId;
     }
 }
 
-$debug[] = "Generated " . count($active_groups) . " active combinations";
+$hourSlots = array_keys($slotsToParticipants);
+sort($hourSlots);
 
-// Step 2: Generate all possible pledge combinations (2-person and 3-person groups)
-$pledge_groups = [];
-
-// 2-pledge combinations
-for ($i = 0; $i < count($pledges); $i++) {
-    for ($j = $i + 1; $j < count($pledges); $j++) {
-        $pledge1 = $pledges[$i];
-        $pledge2 = $pledges[$j];
-        
-        // Only include if both have availability data
-        if (isset($availability[$pledge1['id']]) && isset($availability[$pledge2['id']])) {
-            $pledge_groups[] = [$pledge1, $pledge2];
-        }
-    }
+$interview_opportunities_count = 0;
+foreach ($hourSlots as $slotStart) {
+    $aCount = count($slotsToParticipants[$slotStart]['actives'] ?? []);
+    $pCount = count($slotsToParticipants[$slotStart]['pledges'] ?? []);
+    $twoOnTwo = min(combinationCount($aCount, 2), 60) * min(combinationCount($pCount, 2), 60);
+    $threeOnThree = min(combinationCount($aCount, 3), 40) * min(combinationCount($pCount, 3), 40);
+    $interview_opportunities_count += ($twoOnTwo + $threeOnThree);
 }
 
-// 3-pledge combinations
-for ($i = 0; $i < count($pledges); $i++) {
-    for ($j = $i + 1; $j < count($pledges); $j++) {
-        for ($k = $j + 1; $k < count($pledges); $k++) {
-            $pledge1 = $pledges[$i];
-            $pledge2 = $pledges[$j];  
-            $pledge3 = $pledges[$k];
-            
-            // Only include if all have availability data
-            if (isset($availability[$pledge1['id']]) && 
-                isset($availability[$pledge2['id']]) && 
-                isset($availability[$pledge3['id']])) {
-                $pledge_groups[] = [$pledge1, $pledge2, $pledge3];
-            }
-        }
-    }
-}
+$total_possibilities = max(1, $interview_opportunities_count);
+$explored_possibilities = 0;
 
-$debug[] = "Generated " . count($pledge_groups) . " pledge combinations";
-
-// Step 3: Find overlapping time slots for each active+pledge combination
-$interview_opportunities = [];
-
-foreach ($active_groups as $active_group) {
-    foreach ($pledge_groups as $pledge_group) {
-        // Only match equal-sized groups (2-on-2, 3-on-3)
-        if (count($active_group) !== count($pledge_group)) continue;
-        
-        // Get all participant IDs
-        $all_participants = array_merge($active_group, $pledge_group);
-        $participant_ids = array_column($all_participants, 'id');
-        
-        // Find common 1-hour blocks (consecutive 30-minute slots) for all participants
-        $common_slots = $availability[$participant_ids[0]] ?? [];
-        foreach (array_slice($participant_ids, 1) as $pid) {
-            $common_slots = array_intersect($common_slots, $availability[$pid] ?? []);
-        }
-        
-        if (empty($common_slots)) continue;
-        
-        // Find consecutive slot pairs (1-hour blocks)
-        $hour_blocks = [];
-        sort($common_slots); // Ensure chronological order
-        for ($i = 0; $i < count($common_slots) - 1; $i++) {
-            $slot1 = $common_slots[$i];
-            $slot2 = $common_slots[$i + 1];
-            // Check if slots are exactly 30 minutes apart (1800 seconds)
-            if ($slot2 - $slot1 == 1800) {
-                $hour_blocks[] = [$slot1, $slot2];
-            }
-        }
-        
-        if (empty($hour_blocks)) continue;
-        
-        // NEW: Calculate priority based on previous meetings (including current week)
-        $previous_meetings = 0;
-        foreach ($active_group as $active) {
-            foreach ($pledge_group as $pledge) {
-                if (haveMet($active['id'], $pledge['id'], $completed_pairs, $current_week_pairs)) {
-                    $previous_meetings++;
-                }
-            }
-        }
-        
-        // Pick the best hour block for this pairing (earliest available)
-        $best_hour_block = $hour_blocks[0]; // First (earliest) available hour block
-        $interview_opportunities[] = [
-            'actives' => $active_group,
-            'pledges' => $pledge_group,
-            'time_slots' => $best_hour_block, // Array of [start_slot, end_slot]
-            'participant_ids' => $participant_ids,
-            'previous_meetings' => $previous_meetings,
-            'group_size' => count($active_group),
-            'total_blocks_available' => count($hour_blocks)
-        ];
-    }
-}
-
-$debug[] = "Found " . count($interview_opportunities) . " potential interview opportunities";
-
-// Step 5: Sort opportunities by priority (fewest previous meetings first), then by time
-usort($interview_opportunities, function($a, $b) {
-    // Primary sort: fewer previous meetings = higher priority  
-    if ($a['previous_meetings'] != $b['previous_meetings']) {
-        return $a['previous_meetings'] - $b['previous_meetings'];
-    }
-    // Secondary sort: earlier time slots (with some randomization for equal priority)
-    if ($a['time_slots'][0] != $b['time_slots'][0]) {
-        return $a['time_slots'][0] - $b['time_slots'][0];
-    }
-    // Tertiary sort: random for identical priority and time (fairness)
-    return rand(-1, 1);
-});
-
-$debug[] = "Sorted opportunities by priority (previous meetings) and time";
+$debug[] = 'Using memory-safe slot-based scheduler (no full cross-product materialization)';
+$debug[] = 'One-hour occupancy enforced: users are blocked on both half-hour slices of each interview';
+$debug[] = 'Optimization goal: maximize total interview count (2-on-2 prioritized, broader search enabled)';
+$debug[] = 'Hour blocks with both roles available: ' . count($hourSlots);
+$debug[] = 'Estimated possibilities (capped for performance): ' . $total_possibilities;
 
 // Initialize tracking variables
 $pairings = [];
-$used_time_slots = []; // [timestamp][user_id] = true
 $individual_counts = []; // [user_id] = interview count
+$used_time_slots = []; // [slot_timestamp][user_id] = true
 
-// Step 4 & 6: Schedule interviews avoiding conflicts, up to cap
-foreach ($interview_opportunities as $opportunity) {
+$flexibilityByUser = [];
+foreach ($hourStartsByUser as $uid => $starts) {
+    $flexibilityByUser[$uid] = count($starts);
+}
+
+foreach ($hourSlots as $slotStartTime) {
     if (count($pairings) >= $max_pairings) {
         $debug[] = "Reached weekly cap of $max_pairings interviews";
         break;
     }
-    
-    $time_slots = $opportunity['time_slots']; // Array of [start_slot, end_slot]
-    $participant_ids = $opportunity['participant_ids'];
-    
-    // Step 4: Check if anyone is already scheduled for either time slot
-    $has_conflict = false;
-    foreach ($participant_ids as $pid) {
-        foreach ($time_slots as $slot) {
-            if (isset($used_time_slots[$slot][$pid])) {
-                $has_conflict = true;
-                break 2; // Break out of both loops
+
+    $slotEndTime = $slotStartTime + 1800;
+
+    $slotActives = $slotsToParticipants[$slotStartTime]['actives'] ?? [];
+    $slotPledges = $slotsToParticipants[$slotStartTime]['pledges'] ?? [];
+
+    $slotActives = array_values(array_filter($slotActives, function($activeId) use ($individual_counts, $weeklyActiveLimit, $used_time_slots, $slotStartTime, $slotEndTime) {
+        if (($individual_counts[$activeId] ?? 0) >= $weeklyActiveLimit) {
+            return false;
+        }
+
+        // A one-hour interview occupies both half-hour slices.
+        if (isset($used_time_slots[$slotStartTime][$activeId]) || isset($used_time_slots[$slotEndTime][$activeId])) {
+            return false;
+        }
+
+        return true;
+    }));
+    $slotPledges = array_values(array_filter($slotPledges, function($pledgeId) use ($individual_counts, $weeklyPledgeLimit, $used_time_slots, $slotStartTime, $slotEndTime) {
+        if (($individual_counts[$pledgeId] ?? 0) >= $weeklyPledgeLimit) {
+            return false;
+        }
+
+        // A one-hour interview occupies both half-hour slices.
+        if (isset($used_time_slots[$slotStartTime][$pledgeId]) || isset($used_time_slots[$slotEndTime][$pledgeId])) {
+            return false;
+        }
+
+        return true;
+    }));
+
+    usort($slotActives, function($a, $b) use ($individual_counts) {
+        return ($individual_counts[$a] ?? 0) <=> ($individual_counts[$b] ?? 0);
+    });
+    usort($slotPledges, function($a, $b) use ($individual_counts) {
+        return ($individual_counts[$a] ?? 0) <=> ($individual_counts[$b] ?? 0);
+    });
+
+    while (count($slotActives) >= 2 && count($slotPledges) >= 2 && count($pairings) < $max_pairings) {
+        $bestOption = null;
+
+        foreach ([2, 3] as $groupSize) {
+            if ($groupSize === 3 && (count($slotActives) < 3 || count($slotPledges) < 3)) {
+                continue;
+            }
+
+            // Explore a larger search space to maximize final interview count.
+            $activePoolLimit = $groupSize === 3 ? 12 : 16;
+            $pledgePoolLimit = $groupSize === 3 ? 12 : 16;
+            $comboCap = $groupSize === 3 ? 80 : 180;
+
+            $candidateActives = array_slice($slotActives, 0, $activePoolLimit);
+            $candidatePledges = array_slice($slotPledges, 0, $pledgePoolLimit);
+
+            // Add small shuffle so regeneration still provides variety for similar scores.
+            shuffle($candidateActives);
+            shuffle($candidatePledges);
+
+            $activeCombos = cappedCombinations($candidateActives, $groupSize, $comboCap);
+            $pledgeCombos = cappedCombinations($candidatePledges, $groupSize, $comboCap);
+
+            foreach ($activeCombos as $activeCombo) {
+                foreach ($pledgeCombos as $pledgeCombo) {
+                    $explored_possibilities++;
+                    if ($explored_possibilities > $total_possibilities) {
+                        $total_possibilities = $explored_possibilities;
+                    }
+
+                    $previousMeetings = 0;
+                    $hasRepeatMeeting = false;
+
+                    foreach ($activeCombo as $activeId) {
+                        foreach ($pledgeCombo as $pledgeId) {
+                            if (haveMet($activeId, $pledgeId, $completed_pairs, $current_week_pairs)) {
+                                $hasRepeatMeeting = true;
+                                break 2;
+                            }
+                        }
+                    }
+
+                    if ($hasRepeatMeeting) {
+                        continue;
+                    }
+
+                    $loadScore = 0;
+                    $flexibilityScore = 0;
+                    foreach ($activeCombo as $activeId) {
+                        $loadScore += ($individual_counts[$activeId] ?? 0);
+                        $flexibilityScore += ($flexibilityByUser[$activeId] ?? 999);
+                    }
+                    foreach ($pledgeCombo as $pledgeId) {
+                        $loadScore += ($individual_counts[$pledgeId] ?? 0);
+                        $flexibilityScore += ($flexibilityByUser[$pledgeId] ?? 999);
+                    }
+
+                    // Lower score is better: first balance workload, then prioritize less-flexible people.
+                    $score = ($loadScore * 100) + $flexibilityScore;
+
+                    if ($bestOption === null ||
+                        $score < $bestOption['score'] ||
+                        ($score === $bestOption['score'] && $groupSize < $bestOption['group_size'])) {
+                        $bestOption = [
+                            'group_size' => $groupSize,
+                            'active_ids' => $activeCombo,
+                            'pledge_ids' => $pledgeCombo,
+                            'score' => $score,
+                            'previous_meetings' => $previousMeetings
+                        ];
+
+                        if ($score === 0 && $groupSize === 2) {
+                            break 3;
+                        }
+                    }
+                }
             }
         }
-    }
-    
-    // Check individual weekly limits
-    $exceeds_limit = false;
-    foreach ($opportunity['actives'] as $active) {
-        if (($individual_counts[$active['id']] ?? 0) >= $weeklyActiveLimit) {
-            $exceeds_limit = true;
+
+        if ($bestOption === null) {
             break;
         }
-    }
-    foreach ($opportunity['pledges'] as $pledge) {
-        if (($individual_counts[$pledge['id']] ?? 0) >= $weeklyPledgeLimit) {
-            $exceeds_limit = true;
-            break;
+
+        $chosenActives = [];
+        foreach ($bestOption['active_ids'] as $activeId) {
+            $chosenActives[] = $usersById[$activeId];
+            $individual_counts[$activeId] = ($individual_counts[$activeId] ?? 0) + 1;
+            $used_time_slots[$slotStartTime][$activeId] = true;
+            $used_time_slots[$slotEndTime][$activeId] = true;
         }
-    }
-    
-    // NEW: Check if this pairing has people who have already met (including current week)
-    $has_repeat_meeting = false;
-    foreach ($opportunity['actives'] as $active) {
-        foreach ($opportunity['pledges'] as $pledge) {
-            if (haveMet($active['id'], $pledge['id'], $completed_pairs, $current_week_pairs)) {
-                $has_repeat_meeting = true;
-                break 2;
+
+        $chosenPledges = [];
+        foreach ($bestOption['pledge_ids'] as $pledgeId) {
+            $chosenPledges[] = $usersById[$pledgeId];
+            $individual_counts[$pledgeId] = ($individual_counts[$pledgeId] ?? 0) + 1;
+            $used_time_slots[$slotStartTime][$pledgeId] = true;
+            $used_time_slots[$slotEndTime][$pledgeId] = true;
+        }
+
+        foreach ($bestOption['active_ids'] as $activeId) {
+            foreach ($bestOption['pledge_ids'] as $pledgeId) {
+                $current_week_pairs[$activeId][$pledgeId] = true;
             }
         }
-    }
-    
-    if (!$has_conflict && !$exceeds_limit && !$has_repeat_meeting) {
-        // Schedule this interview
-        $group_size = $opportunity['group_size'];
-        $slot_start_time = $time_slots[0];
-        $slot_end_time = $time_slots[1];
-        
+
+        $groupSize = $bestOption['group_size'];
         $pairings[] = [
-            'actives' => $opportunity['actives'],
-            'pledges' => $opportunity['pledges'],
-            'time_slot' => date('D H:i', $slot_start_time) . '-' . date('H:i', $slot_end_time),
-            'type' => "{$group_size}-on-{$group_size}"
+            'actives' => $chosenActives,
+            'pledges' => $chosenPledges,
+            'time_slot' => date('D H:i', $slotStartTime) . '-' . date('H:i', $slotEndTime),
+            'type' => "{$groupSize}-on-{$groupSize}"
         ];
-        
-        // Mark participants as used for both time slots in the hour block
-        foreach ($participant_ids as $pid) {
-            foreach ($time_slots as $slot) {
-                $used_time_slots[$slot][$pid] = true;
-            }
-        }
-        
-        // Increment individual interview counts
-        foreach ($opportunity['actives'] as $active) {
-            $individual_counts[$active['id']] = ($individual_counts[$active['id']] ?? 0) + 1;
-        }
-        foreach ($opportunity['pledges'] as $pledge) {
-            $individual_counts[$pledge['id']] = ($individual_counts[$pledge['id']] ?? 0) + 1;
-        }
-        
-        // NEW: Track current week pairings to prevent repeats
-        foreach ($opportunity['actives'] as $active) {
-            foreach ($opportunity['pledges'] as $pledge) {
-                $current_week_pairs[$active['id']][$pledge['id']] = true;
-            }
-        }
-        
-        $active_names = implode(' & ', array_column($opportunity['actives'], 'name'));
-        $pledge_names = implode(' & ', array_column($opportunity['pledges'], 'name'));
-        $blocks_available = $opportunity['total_blocks_available'] ?? 1;
-        $debug[] = "Scheduled {$group_size}-on-{$group_size}: $active_names with $pledge_names at " . date('D H:i', $slot_start_time) . '-' . date('H:i', $slot_end_time) . " ({$opportunity['previous_meetings']} previous meetings, $blocks_available hour blocks available)";
-    } else if ($has_repeat_meeting) {
-        // NEW: Debug info for skipped repeat meetings
-        $active_names = implode(' & ', array_column($opportunity['actives'], 'name'));
-        $pledge_names = implode(' & ', array_column($opportunity['pledges'], 'name'));
-        $debug[] = "Skipped repeat pairing: $active_names with $pledge_names (already met this week or previously)";
+
+        $slotActives = array_values(array_diff($slotActives, $bestOption['active_ids']));
+        $slotPledges = array_values(array_diff($slotPledges, $bestOption['pledge_ids']));
+
+        $activeNames = implode(' & ', array_column($chosenActives, 'name'));
+        $pledgeNames = implode(' & ', array_column($chosenPledges, 'name'));
+        $debug[] = "Scheduled {$groupSize}-on-{$groupSize}: $activeNames with $pledgeNames at " . date('D H:i', $slotStartTime) . '-' . date('H:i', $slotEndTime);
+
+        writeProgress(
+            $jobId,
+            $explored_possibilities,
+            $total_possibilities,
+            count($pairings),
+            'running',
+            'Scheduling interviews...'
+        );
     }
+
+    writeProgress(
+        $jobId,
+        $explored_possibilities,
+        $total_possibilities,
+        count($pairings),
+        'running',
+        'Exploring remaining hour blocks...'
+    );
 }
 
 // Calculate processing time and stats
@@ -423,6 +567,15 @@ foreach ($type_counts as $type => $count) {
 }
 $debug[] = "Interview types: " . implode(', ', $type_breakdown);
 
+writeProgress(
+    $jobId,
+    max($explored_possibilities, $total_possibilities),
+    max($explored_possibilities, $total_possibilities),
+    count($pairings),
+    'done',
+    'Generation complete'
+);
+
 if ($is_ajax) {
     // Return just the pairing results for AJAX
     ?>
@@ -446,7 +599,7 @@ if ($is_ajax) {
             <small>⏱️ Generation Stats: Took <?=$processing_time?>ms to compare <?=count($availability_data)?> availability records | <?=$used_actives?> actives used out of <?=$actives_with_availability?> with availability | <?=$used_pledges?> pledges used out of <?=$pledges_with_availability?> with availability</small>
         </div>
 
-        <h3>📋 Suggested Interview Pairings for <?= $week_label ?> (<?= date('M j', $base) ?> - <?= date('M j', strtotime('+6 days', $base)) ?>)</h3>
+        <h3>📋 Suggested Coffee Chat for <?= $week_label ?> (<?= date('M j', $base) ?> - <?= date('M j', strtotime('+6 days', $base)) ?>)</h3>
         
         <div class="row">
         <?php foreach ($pairings as $i => $pairing): ?>
@@ -454,7 +607,7 @@ if ($is_ajax) {
                 <div class="card">
                     <div class="card-body">
                         <h6 class="card-title">
-                            Interview #<?= $i + 1 ?>
+                            Coffee Chat #<?= $i + 1 ?>
                             <span class="badge bg-<?= $pairing['type'] === '2-on-2' ? 'primary' : 'info' ?>"><?= $pairing['type'] ?></span>
                         </h6>
                         <p class="mb-1"><strong>Actives:</strong> <?= implode(' & ', array_column($pairing['actives'], 'name')) ?></p>
@@ -601,7 +754,7 @@ if ($is_ajax) {
 
         <div class="alert alert-success">
             <strong>✅ Successfully generated <?= count($pairings) ?> interview pairings!</strong><br>
-            Found <?= count($interview_opportunities) ?> potential opportunities, scheduled <?= count($pairings) ?> (max: <?=$max_pairings?>)
+            Found <?= $interview_opportunities_count ?> potential opportunities, scheduled <?= count($pairings) ?> (max: <?=$max_pairings?>)
         </div>
 
         <h3>📋 Suggested Interview Pairings</h3>

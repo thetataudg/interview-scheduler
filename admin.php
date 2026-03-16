@@ -684,6 +684,9 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
           <strong>Generating Pairings</strong><br>
           <small>Finding optimal combinations... This may take up to 30 seconds.</small>
         </div>
+        <div id="pairingProgressText" class="loading-text" style="margin-top: 10px;">
+          Explored 0/1 possibilities, 0% done, 0 pairings created
+        </div>
       </div>
       
       <!-- Results container -->
@@ -747,12 +750,16 @@ document.getElementById('generatePairings').addEventListener('click', function()
     const button = this;
     const loader = document.getElementById('pairingLoader');
     const results = document.getElementById('pairingResults');
+  const progressText = document.getElementById('pairingProgressText');
+  const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+  let pollTimer = null;
     
     // Show loader immediately
     button.disabled = true;
     button.textContent = 'Generating...';
     loader.style.display = 'block';
     results.innerHTML = '';
+    progressText.textContent = 'Explored 0/1 possibilities, 0% done, 0 pairings created';
     
     // Get the input values
     const weekSelect = document.getElementById('weekSelect').value;
@@ -770,6 +777,29 @@ document.getElementById('generatePairings').addEventListener('click', function()
     if (document.getElementById('excludeSaturday').checked) excludedDays.push('6');
     if (document.getElementById('excludeSunday').checked) excludedDays.push('0');
     
+    // Poll progress while generation request is running
+    const pollProgress = () => {
+      fetch(`generate_pairings.php?action=progress&job_id=${encodeURIComponent(jobId)}`, {
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      })
+      .then(response => response.json())
+      .then(progress => {
+        const explored = Number(progress.explored || 0);
+        const total = Math.max(1, Number(progress.total || 1));
+        const percent = Number(progress.percent || 0).toFixed(1);
+        const pairings = Number(progress.pairings || 0);
+        progressText.textContent = `Explored ${explored}/${total} possibilities, ${percent}% done, ${pairings} pairings created`;
+      })
+      .catch(() => {
+        // Keep silent on transient polling errors while generation request is active.
+      });
+    };
+
+    pollProgress();
+    pollTimer = setInterval(pollProgress, 700);
+
     // Make AJAX request with parameters
     fetch(`generate_pairings.php?week=${weekSelect}`, {
         method: 'POST',
@@ -781,11 +811,34 @@ document.getElementById('generatePairings').addEventListener('click', function()
             'global_max': globalMax,
             'active_max': activeMax,
             'pledge_max': pledgeMax,
-            'excluded_days': excludedDays.join(',')
+            'excluded_days': excludedDays.join(','),
+            'job_id': jobId
         })
     })
     .then(response => response.text())
     .then(html => {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+          }
+
+          // One final progress refresh to show the completed numbers.
+          return fetch(`generate_pairings.php?action=progress&job_id=${encodeURIComponent(jobId)}`, {
+            headers: {
+              'X-Requested-With': 'XMLHttpRequest'
+            }
+          })
+          .then(response => response.json())
+          .then(progress => {
+            const explored = Number(progress.explored || 0);
+            const total = Math.max(1, Number(progress.total || 1));
+            const percent = Number(progress.percent || 100).toFixed(1);
+            const pairings = Number(progress.pairings || 0);
+            progressText.textContent = `Explored ${explored}/${total} possibilities, ${percent}% done, ${pairings} pairings created`;
+            return html;
+          })
+          .catch(() => html);
+        })
+        .then(html => {
         // Hide loader
         loader.style.display = 'none';
         button.disabled = false;
@@ -795,6 +848,10 @@ document.getElementById('generatePairings').addEventListener('click', function()
         results.innerHTML = html;
     })
     .catch(error => {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+      }
+
         // Hide loader
         loader.style.display = 'none';
         button.disabled = false;
