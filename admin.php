@@ -151,13 +151,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_interview'])) 
 if (isset($_POST['upload_csv']) && isset($_FILES['csv_file'])) {
     $csv_date = $_POST['csv_date'] ?? date('Y-m-d');
     $csv_notes = $_POST['csv_notes'] ?? '';
+  $_SESSION['csv_upload_report'] = null;
     
     if ($_FILES['csv_file']['error'] === UPLOAD_ERR_OK) {
         $upload_results = processCsvUpload($_FILES['csv_file'], $csv_date, $csv_notes, $db);
-        
-        // Redirect with results
-        $params = http_build_query($upload_results);
-        header("Location: admin.php?csv_uploaded=1&{$params}");
+
+    $_SESSION['csv_upload_report'] = $upload_results;
+    header("Location: admin.php?csv_uploaded=1");
+    exit;
+  } else {
+    $upload_error_code = intval($_FILES['csv_file']['error']);
+    $_SESSION['csv_upload_report'] = [
+      'added' => 0,
+      'skipped' => 0,
+      'errors' => 1,
+      'error_rows' => [[
+        'line' => '-',
+        'pledge' => '-',
+        'active' => '-',
+        'error' => "File upload failed (error code {$upload_error_code})"
+      ]]
+    ];
+    header("Location: admin.php?csv_uploaded=1");
         exit;
     }
 }
@@ -209,13 +224,22 @@ if (isset($_POST['cleanup_duplicates'])) {
 }
 
 function processCsvUpload($file, $date, $notes, $db) {
-    $results = ['added' => 0, 'skipped' => 0, 'errors' => 0, 'error_details' => []];
+  $results = ['added' => 0, 'skipped' => 0, 'errors' => 0, 'error_rows' => []];
+
+  $addCsvError = function($line, $pledge, $active, $message) use (&$results) {
+    $results['errors']++;
+    $results['error_rows'][] = [
+      'line' => $line,
+      'pledge' => $pledge,
+      'active' => $active,
+      'error' => $message
+    ];
+  };
     
     // Read CSV file
     $handle = fopen($file['tmp_name'], 'r');
     if (!$handle) {
-        $results['errors']++;
-        $results['error_details'][] = "Could not read CSV file";
+    $addCsvError('-', '-', '-', 'Could not read CSV file');
         return $results;
     }
     
@@ -248,8 +272,7 @@ function processCsvUpload($file, $date, $notes, $db) {
         $line_number++;
         
         if (count($row) < 2) {
-            $results['errors']++;
-            $results['error_details'][] = "Line {$line_number}: Not enough columns";
+          $addCsvError($line_number, $row[0] ?? '', $row[1] ?? '', 'Not enough columns (expected: Pledge, Active)');
             continue;
         }
         
@@ -257,8 +280,7 @@ function processCsvUpload($file, $date, $notes, $db) {
         $active_name = trim($row[1]);
         
         if (empty($pledge_name) || empty($active_name)) {
-            $results['errors']++;
-            $results['error_details'][] = "Line {$line_number}: Empty pledge or active name";
+          $addCsvError($line_number, $pledge_name, $active_name, 'Empty pledge or active name');
             continue;
         }
         
@@ -270,27 +292,23 @@ function processCsvUpload($file, $date, $notes, $db) {
         $active_user = $user_lookup[$active_key] ?? null;
         
         if (!$pledge_user) {
-            $results['errors']++;
-            $results['error_details'][] = "Line {$line_number}: Pledge '{$pledge_name}' not found";
+          $addCsvError($line_number, $pledge_name, $active_name, "Pledge '{$pledge_name}' not found");
             continue;
         }
         
         if (!$active_user) {
-            $results['errors']++;
-            $results['error_details'][] = "Line {$line_number}: Active '{$active_name}' not found";
+          $addCsvError($line_number, $pledge_name, $active_name, "Active '{$active_name}' not found");
             continue;
         }
         
         // Verify roles
         if ($pledge_user['role'] !== 'pledge') {
-            $results['errors']++;
-            $results['error_details'][] = "Line {$line_number}: '{$pledge_name}' is not a pledge";
+          $addCsvError($line_number, $pledge_name, $active_name, "'{$pledge_name}' is not a pledge");
             continue;
         }
         
         if ($active_user['role'] !== 'active') {
-            $results['errors']++;
-            $results['error_details'][] = "Line {$line_number}: '{$active_name}' is not an active";
+          $addCsvError($line_number, $pledge_name, $active_name, "'{$active_name}' is not an active");
             continue;
         }
         
@@ -328,8 +346,7 @@ function processCsvUpload($file, $date, $notes, $db) {
             $results['added']++;
 
         } catch (Exception $e) {
-            $results['errors']++;
-            $results['error_details'][] = "Line {$line_number}: Database error - " . $e->getMessage();
+          $addCsvError($line_number, $pledge_name, $active_name, 'Database error - ' . $e->getMessage());
         }
     }
     
@@ -347,6 +364,12 @@ $completed_stmt = $db->query("
     ORDER BY ci.interview_date DESC
 ");
 $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$csv_upload_report = null;
+if (isset($_SESSION['csv_upload_report'])) {
+  $csv_upload_report = $_SESSION['csv_upload_report'];
+  unset($_SESSION['csv_upload_report']);
+}
 ?>
 <!DOCTYPE html>
 <html>
@@ -431,10 +454,41 @@ $completed = $completed_stmt->fetchAll(PDO::FETCH_ASSOC);
   <?php if (isset($_GET['csv_uploaded'])): ?>
     <div class="alert alert-success">
       <strong>CSV Upload Complete!</strong><br>
-      Added: <?= intval($_GET['added']) ?> new interviews |
-      Skipped: <?= intval($_GET['skipped']) ?> duplicates |
-      Errors: <?= intval($_GET['errors']) ?> invalid entries
+      Added: <?= intval($csv_upload_report['added'] ?? 0) ?> new interviews |
+      Skipped: <?= intval($csv_upload_report['skipped'] ?? 0) ?> duplicates |
+      Errors: <?= intval($csv_upload_report['errors'] ?? 0) ?> invalid entries
     </div>
+    <?php if (!empty($csv_upload_report['error_rows'])): ?>
+      <div class="card border-danger mb-3">
+        <div class="card-header bg-danger text-white">
+          <strong>CSV Error Details (Rows To Correct)</strong>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-sm table-bordered mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>Line</th>
+                  <th>Pledge</th>
+                  <th>Active</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($csv_upload_report['error_rows'] as $error_row): ?>
+                  <tr>
+                    <td><?= htmlspecialchars((string)($error_row['line'] ?? '-')) ?></td>
+                    <td><?= htmlspecialchars((string)($error_row['pledge'] ?? '')) ?></td>
+                    <td><?= htmlspecialchars((string)($error_row['active'] ?? '')) ?></td>
+                    <td><?= htmlspecialchars((string)($error_row['error'] ?? 'Unknown error')) ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    <?php endif; ?>
   <?php endif; ?>
   <?php if (isset($csv_error)): ?>
     <div class="alert alert-danger"><?= htmlspecialchars($csv_error) ?></div>
