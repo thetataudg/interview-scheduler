@@ -18,188 +18,221 @@ $all_actives = array_values(array_filter($all_users, fn($u) => $u['role'] === 'a
 $all_pledges = array_values(array_filter($all_users, fn($u) => $u['role'] === 'pledge' && empty($u['exclude_from_pairings'])));
 $excluded_users = array_values(array_filter($all_users, fn($u) => !empty($u['exclude_from_pairings'])));
 
-$current_base = strtotime('monday this week');
-$next_base = strtotime('next Monday');
-$window_start = date('Y-m-d', $current_base);
-$window_end = date('Y-m-d', strtotime('+6 days', $next_base));
-
-$availability_stmt = $db->prepare("\n    SELECT user_id, COUNT(*) AS slot_count\n    FROM availabilities\n    WHERE date(slot_start) BETWEEN ? AND ?\n    GROUP BY user_id\n");
-$availability_stmt->execute([$window_start, $window_end]);
-$slot_counts = [];
-foreach ($availability_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-    $slot_counts[intval($row['user_id'])] = intval($row['slot_count']);
+$run_report = isset($_GET['run']) && $_GET['run'] === '1';
+$selected_week = $_GET['week'] ?? 'current';
+if ($selected_week !== 'current' && $selected_week !== 'next') {
+  $selected_week = 'current';
 }
 
-$actives = array_values(array_filter($all_actives, fn($a) => (($slot_counts[$a['id']] ?? 0) > 0)));
-$pledges = array_values(array_filter($all_pledges, fn($p) => (($slot_counts[$p['id']] ?? 0) > 0)));
+$current_base = strtotime('monday this week');
+$next_base = strtotime('next Monday');
+$window_base = $selected_week === 'next' ? $next_base : $current_base;
+$window_start = date('Y-m-d', $window_base);
+$window_end = date('Y-m-d', strtotime('+6 days', $window_base));
 
-$actives_zero_avail = array_values(array_filter($all_actives, fn($a) => (($slot_counts[$a['id']] ?? 0) === 0)));
-$pledges_zero_avail = array_values(array_filter($all_pledges, fn($p) => (($slot_counts[$p['id']] ?? 0) === 0)));
-
-$active_ids_set = array_flip(array_column($actives, 'id'));
-$pledge_ids_set = array_flip(array_column($pledges, 'id'));
-
-$pair_overlap_stmt = $db->prepare("\n    SELECT\n        a1.user_id AS active_id,\n        a2.user_id AS pledge_id,\n        COUNT(DISTINCT datetime(a1.slot_start)) AS overlap_slots\n    FROM availabilities a1\n    JOIN users ua ON ua.id = a1.user_id\n        AND ua.role = 'active'\n        AND COALESCE(ua.exclude_from_pairings, 0) = 0\n    JOIN availabilities a2 ON datetime(a1.slot_start) = datetime(a2.slot_start)\n    JOIN users up ON up.id = a2.user_id\n        AND up.role = 'pledge'\n        AND COALESCE(up.exclude_from_pairings, 0) = 0\n    WHERE date(a1.slot_start) BETWEEN ? AND ?\n      AND date(a2.slot_start) BETWEEN ? AND ?\n    GROUP BY a1.user_id, a2.user_id\n");
-$pair_overlap_stmt->execute([$window_start, $window_end, $window_start, $window_end]);
-
+$slot_counts = [];
+$actives = [];
+$pledges = [];
+$actives_zero_avail = [];
+$pledges_zero_avail = [];
 $overlap_map = [];
 $max_overlap = 0;
-foreach ($pair_overlap_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+$active_stats = [];
+$pledge_stats = [];
+$impossible_pairs = [];
+$meetable_pairs = 0;
+$blocked_pairs = 0;
+$fragile_pairs = 0;
+$healthy_pairs = 0;
+$total_pairs = 0;
+$coverage_percent = 0;
+$weeks_needed = 0;
+$members_total = 0;
+$members_with_any_path = 0;
+$members_without_path = 0;
+$top_bottlenecks = [];
+$chart_labels = [];
+$chart_values = [];
+$chart_max_values = [];
+$completed_pair_map = [];
+$blocked_by_active = [];
+$active_unreachable_counts = [];
+$pledge_unreachable_counts = [];
+
+if ($run_report) {
+  $availability_stmt = $db->prepare("\n    SELECT user_id, COUNT(*) AS slot_count\n    FROM availabilities\n    WHERE date(slot_start) BETWEEN ? AND ?\n    GROUP BY user_id\n");
+  $availability_stmt->execute([$window_start, $window_end]);
+  foreach ($availability_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    $slot_counts[intval($row['user_id'])] = intval($row['slot_count']);
+  }
+
+  $actives = array_values(array_filter($all_actives, fn($a) => (($slot_counts[$a['id']] ?? 0) > 0)));
+  $pledges = array_values(array_filter($all_pledges, fn($p) => (($slot_counts[$p['id']] ?? 0) > 0)));
+
+  $actives_zero_avail = array_values(array_filter($all_actives, fn($a) => (($slot_counts[$a['id']] ?? 0) === 0)));
+  $pledges_zero_avail = array_values(array_filter($all_pledges, fn($p) => (($slot_counts[$p['id']] ?? 0) === 0)));
+
+  $active_ids_set = array_flip(array_column($actives, 'id'));
+  $pledge_ids_set = array_flip(array_column($pledges, 'id'));
+
+  $pair_overlap_stmt = $db->prepare("\n    SELECT\n        a1.user_id AS active_id,\n        a2.user_id AS pledge_id,\n        COUNT(DISTINCT datetime(a1.slot_start)) AS overlap_slots\n    FROM availabilities a1\n    JOIN users ua ON ua.id = a1.user_id\n        AND ua.role = 'active'\n        AND COALESCE(ua.exclude_from_pairings, 0) = 0\n    JOIN availabilities a2 ON datetime(a1.slot_start) = datetime(a2.slot_start)\n    JOIN users up ON up.id = a2.user_id\n        AND up.role = 'pledge'\n        AND COALESCE(up.exclude_from_pairings, 0) = 0\n    WHERE date(a1.slot_start) BETWEEN ? AND ?\n      AND date(a2.slot_start) BETWEEN ? AND ?\n    GROUP BY a1.user_id, a2.user_id\n");
+  $pair_overlap_stmt->execute([$window_start, $window_end, $window_start, $window_end]);
+
+  foreach ($pair_overlap_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
     $aid = intval($row['active_id']);
     $pid = intval($row['pledge_id']);
     $slots = intval($row['overlap_slots']);
 
     if (!isset($active_ids_set[$aid]) || !isset($pledge_ids_set[$pid])) {
-        continue;
+      continue;
     }
 
     if (!isset($overlap_map[$aid])) {
-        $overlap_map[$aid] = [];
+      $overlap_map[$aid] = [];
     }
     $overlap_map[$aid][$pid] = $slots;
     if ($slots > $max_overlap) {
-        $max_overlap = $slots;
+      $max_overlap = $slots;
     }
-}
+  }
 
-$active_stats = [];
-$pledge_stats = [];
-$impossible_pairs = [];
+  foreach ($actives as $a) {
+    $active_unreachable_counts[$a['id']] = 0;
+  }
+  foreach ($pledges as $p) {
+    $pledge_unreachable_counts[$p['id']] = 0;
+  }
 
-$meetable_pairs = 0;
-$blocked_pairs = 0;
-$fragile_pairs = 0;
-$healthy_pairs = 0;
-
-foreach ($actives as $a) {
+  foreach ($actives as $a) {
     $partners = 0;
     $fragile = 0;
     $overlap_slots = 0;
 
     foreach ($pledges as $p) {
-        $slots = intval($overlap_map[$a['id']][$p['id']] ?? 0);
-        if ($slots > 0) {
-            $partners++;
-            $overlap_slots += $slots;
-            $meetable_pairs++;
-            if ($slots === 1) {
-                $fragile_pairs++;
-                $fragile++;
-            } else {
-                $healthy_pairs++;
-            }
+      $slots = intval($overlap_map[$a['id']][$p['id']] ?? 0);
+      if ($slots > 0) {
+        $partners++;
+        $overlap_slots += $slots;
+        $meetable_pairs++;
+        if ($slots === 1) {
+          $fragile_pairs++;
+          $fragile++;
         } else {
-            $blocked_pairs++;
-            $impossible_pairs[] = [
-                'active_name' => $a['name'],
-                'pledge_name' => $p['name']
-            ];
+          $healthy_pairs++;
         }
+      } else {
+        $blocked_pairs++;
+        $active_unreachable_counts[$a['id']]++;
+        $pledge_unreachable_counts[$p['id']]++;
+        $impossible_pairs[] = [
+          'active_name' => $a['name'],
+          'pledge_name' => $p['name']
+        ];
+      }
     }
 
     $active_stats[$a['id']] = [
-        'partners' => $partners,
-        'fragile' => $fragile,
-        'overlap_slots' => $overlap_slots,
-        'availability_slots' => intval($slot_counts[$a['id']] ?? 0)
+      'partners' => $partners,
+      'fragile' => $fragile,
+      'overlap_slots' => $overlap_slots,
+      'availability_slots' => intval($slot_counts[$a['id']] ?? 0)
     ];
-}
+  }
 
-foreach ($pledges as $p) {
+  foreach ($pledges as $p) {
     $partners = 0;
     $fragile = 0;
     $overlap_slots = 0;
 
     foreach ($actives as $a) {
-        $slots = intval($overlap_map[$a['id']][$p['id']] ?? 0);
-        if ($slots > 0) {
-            $partners++;
-            $overlap_slots += $slots;
-            if ($slots === 1) {
-                $fragile++;
-            }
+      $slots = intval($overlap_map[$a['id']][$p['id']] ?? 0);
+      if ($slots > 0) {
+        $partners++;
+        $overlap_slots += $slots;
+        if ($slots === 1) {
+          $fragile++;
         }
+      }
     }
 
     $pledge_stats[$p['id']] = [
-        'partners' => $partners,
-        'fragile' => $fragile,
-        'overlap_slots' => $overlap_slots,
-        'availability_slots' => intval($slot_counts[$p['id']] ?? 0)
+      'partners' => $partners,
+      'fragile' => $fragile,
+      'overlap_slots' => $overlap_slots,
+      'availability_slots' => intval($slot_counts[$p['id']] ?? 0)
     ];
-}
+  }
 
-$total_pairs = count($actives) * count($pledges);
-$coverage_percent = $total_pairs > 0 ? round(($meetable_pairs / $total_pairs) * 100, 1) : 0;
+  $total_pairs = count($actives) * count($pledges);
+  $coverage_percent = $total_pairs > 0 ? round(($meetable_pairs / $total_pairs) * 100, 1) : 0;
 
-$max_active_partners = 0;
-foreach ($active_stats as $s) {
+  $max_active_partners = 0;
+  foreach ($active_stats as $s) {
     $max_active_partners = max($max_active_partners, intval($s['partners']));
-}
-$max_pledge_partners = 0;
-foreach ($pledge_stats as $s) {
+  }
+  $max_pledge_partners = 0;
+  foreach ($pledge_stats as $s) {
     $max_pledge_partners = max($max_pledge_partners, intval($s['partners']));
-}
+  }
 
-$weeks_by_active_capacity = $max_active_partners > 0 ? (int)ceil($max_active_partners / $per_person_weekly_cap) : 0;
-$weeks_by_pledge_capacity = $max_pledge_partners > 0 ? (int)ceil($max_pledge_partners / $per_person_weekly_cap) : 0;
-$weeks_by_global_capacity = $meetable_pairs > 0 ? (int)ceil($meetable_pairs / $global_weekly_cap) : 0;
-$weeks_needed = max($weeks_by_active_capacity, $weeks_by_pledge_capacity, $weeks_by_global_capacity);
+  $weeks_by_active_capacity = $max_active_partners > 0 ? (int)ceil($max_active_partners / $per_person_weekly_cap) : 0;
+  $weeks_by_pledge_capacity = $max_pledge_partners > 0 ? (int)ceil($max_pledge_partners / $per_person_weekly_cap) : 0;
+  $weeks_by_global_capacity = $meetable_pairs > 0 ? (int)ceil($meetable_pairs / $global_weekly_cap) : 0;
+  $weeks_needed = max($weeks_by_active_capacity, $weeks_by_pledge_capacity, $weeks_by_global_capacity);
 
-$actives_with_path = count(array_filter($active_stats, fn($s) => intval($s['partners']) > 0));
-$pledges_with_path = count(array_filter($pledge_stats, fn($s) => intval($s['partners']) > 0));
-$members_total = count($actives) + count($pledges);
-$members_with_any_path = $actives_with_path + $pledges_with_path;
-$members_without_path = $members_total - $members_with_any_path;
+  $actives_with_path = count(array_filter($active_stats, fn($s) => intval($s['partners']) > 0));
+  $pledges_with_path = count(array_filter($pledge_stats, fn($s) => intval($s['partners']) > 0));
+  $members_total = count($actives) + count($pledges);
+  $members_with_any_path = $actives_with_path + $pledges_with_path;
+  $members_without_path = $members_total - $members_with_any_path;
 
-$bottlenecks = [];
-foreach ($actives as $a) {
+  $bottlenecks = [];
+  foreach ($actives as $a) {
     $s = $active_stats[$a['id']];
     $bottlenecks[] = [
-        'name' => $a['name'],
-        'role' => 'Active',
-        'partners' => intval($s['partners']),
-        'max_partners' => count($pledges),
-        'overlap_slots' => intval($s['overlap_slots'])
+      'name' => $a['name'],
+      'role' => 'Active',
+      'partners' => intval($s['partners']),
+      'max_partners' => count($pledges),
+      'overlap_slots' => intval($s['overlap_slots'])
     ];
-}
-foreach ($pledges as $p) {
+  }
+  foreach ($pledges as $p) {
     $s = $pledge_stats[$p['id']];
     $bottlenecks[] = [
-        'name' => $p['name'],
-        'role' => 'Pledge',
-        'partners' => intval($s['partners']),
-        'max_partners' => count($actives),
-        'overlap_slots' => intval($s['overlap_slots'])
+      'name' => $p['name'],
+      'role' => 'Pledge',
+      'partners' => intval($s['partners']),
+      'max_partners' => count($actives),
+      'overlap_slots' => intval($s['overlap_slots'])
     ];
-}
+  }
 
-usort($bottlenecks, function($a, $b) {
+  usort($bottlenecks, function($a, $b) {
     if ($a['partners'] !== $b['partners']) {
-        return $a['partners'] <=> $b['partners'];
+      return $a['partners'] <=> $b['partners'];
     }
     if ($a['overlap_slots'] !== $b['overlap_slots']) {
-        return $a['overlap_slots'] <=> $b['overlap_slots'];
+      return $a['overlap_slots'] <=> $b['overlap_slots'];
     }
     return strcmp($a['name'], $b['name']);
-});
-$top_bottlenecks = array_slice($bottlenecks, 0, 10);
+  });
+  $top_bottlenecks = array_slice($bottlenecks, 0, 10);
 
-$chart_labels = array_map(fn($m) => $m['name'] . ' (' . $m['role'] . ')', $top_bottlenecks);
-$chart_values = array_map(fn($m) => intval($m['partners']), $top_bottlenecks);
-$chart_max_values = array_map(fn($m) => intval($m['max_partners']), $top_bottlenecks);
+  $chart_labels = array_map(fn($m) => $m['name'] . ' (' . $m['role'] . ')', $top_bottlenecks);
+  $chart_values = array_map(fn($m) => intval($m['partners']), $top_bottlenecks);
+  $chart_max_values = array_map(fn($m) => intval($m['max_partners']), $top_bottlenecks);
 
-$completed_pairs_stmt = $db->query("SELECT DISTINCT active_id, pledge_id FROM completed_interviews");
-$completed_pair_map = [];
-foreach ($completed_pairs_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-  $completed_pair_map[intval($row['active_id']) . '_' . intval($row['pledge_id'])] = true;
+  $completed_pairs_stmt = $db->query("SELECT DISTINCT active_id, pledge_id FROM completed_interviews");
+  foreach ($completed_pairs_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    $completed_pair_map[intval($row['active_id']) . '_' . intval($row['pledge_id'])] = true;
+  }
+
+  foreach ($impossible_pairs as $pair) {
+    $blocked_by_active[$pair['active_name']][] = $pair['pledge_name'];
+  }
+  ksort($blocked_by_active);
 }
-
-$blocked_by_active = [];
-foreach ($impossible_pairs as $pair) {
-  $blocked_by_active[$pair['active_name']][] = $pair['pledge_name'];
-}
-ksort($blocked_by_active);
 
 function matrix_color($slots, $max_overlap) {
     if ($slots <= 0) {
@@ -222,6 +255,38 @@ function matrix_color($slots, $max_overlap) {
   <style>
     .navbar-dark { background-color: #000 !important; }
     .kpi-card .card-body { min-height: 140px; }
+    .material-progress {
+      width: 300px;
+      height: 4px;
+      background: #e0e0e0;
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+      margin: 0 auto;
+    }
+
+    .material-progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #2196F3, #21CBF3);
+      border-radius: 2px;
+      position: absolute;
+      left: -100%;
+      animation: material-indeterminate 0.8375s infinite;
+    }
+
+    @keyframes material-indeterminate {
+      0% { left: -100%; width: 100%; }
+      50% { left: 107%; width: 100%; }
+      100% { left: 107%; width: 0%; }
+    }
+
+    .loading-text {
+      margin-top: 10px;
+      font-size: 14px;
+      color: #666;
+      text-align: center;
+    }
+
     .matrix-wrap {
       overflow: auto;
       max-height: 70vh;
@@ -284,6 +349,56 @@ function matrix_color($slots, $max_overlap) {
       color: #fff;
       font-weight: 700;
     }
+    .matrix-member-meta {
+      display: flex;
+      align-items: stretch;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .matrix-name-block {
+      min-width: 0;
+    }
+    .unreachable-pill {
+      min-width: 46px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      border-radius: 999px;
+      padding: 0.2rem 0.45rem;
+      margin: auto 0;
+    }
+    .unreachable-pill.bad {
+      background: var(--bs-danger-bg-subtle);
+      color: var(--bs-danger-text-emphasis);
+      border: 1px solid var(--bs-danger-border-subtle);
+    }
+    .unreachable-pill.good {
+      background: var(--bs-success-bg-subtle);
+      color: var(--bs-success-text-emphasis);
+      border: 1px solid var(--bs-success-border-subtle);
+    }
+    .unreachable-pill-col {
+      margin-top: 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 700;
+    }
+    .unreachable-pill-col.bad {
+      background: var(--bs-danger-bg-subtle);
+      color: var(--bs-danger-text-emphasis);
+      border: 1px solid var(--bs-danger-border-subtle);
+    }
+    .unreachable-pill-col.good {
+      background: var(--bs-success-bg-subtle);
+      color: var(--bs-success-text-emphasis);
+      border: 1px solid var(--bs-success-border-subtle);
+    }
     .legend-dot {
       display: inline-block;
       width: 12px;
@@ -318,21 +433,54 @@ function matrix_color($slots, $max_overlap) {
 
 <div class="container-fluid py-4 px-4">
   <div class="d-flex justify-content-between align-items-center mb-3">
-    <h2 class="mb-0">Coverage Command Center</h2>
+    <h2 class="mb-0">Coverage Report</h2>
     <a href="admin.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back to Admin</a>
   </div>
 
-  <div class="alert alert-primary mb-4">
-    <p class="mb-2"><strong>Window:</strong> <?= date('M j', $current_base) ?> to <?= date('M j', strtotime('+6 days', $next_base)) ?>.</p>
-    <p class="mb-2">This report is built around a matrix and charts so you can spot blocked pairs, fragile overlap, and bottlenecks fast.</p>
-    <div class="jump small">
-      Jump:
-      <a href="#stats">Stats</a>
-      <a href="#charts">Charts</a>
-      <a href="#matrix">Matrix</a>
-      <a href="#blocked">Blocked Pairs</a>
+  <div class="card mb-4">
+    <div class="card-header">Report Controls</div>
+    <div class="card-body">
+      <p class="mb-3 text-muted">Choose a week and click Run to build the matrix, charts, and statistics.</p>
+      <form method="get" class="row g-3 align-items-end report-run-form" id="reportRunForm">
+        <input type="hidden" name="run" value="1">
+        <div class="col-md-3">
+          <label class="form-label">Week</label>
+          <select class="form-select" name="week">
+            <option value="current" <?= $selected_week === 'current' ? 'selected' : '' ?>>Current Week (<?= date('M j', $current_base) ?> - <?= date('M j', strtotime('+6 days', $current_base)) ?>)</option>
+            <option value="next" <?= $selected_week === 'next' ? 'selected' : '' ?>>Next Week (<?= date('M j', $next_base) ?> - <?= date('M j', strtotime('+6 days', $next_base)) ?>)</option>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Interviews per person per week</label>
+          <input class="form-control" type="number" min="1" name="per_person_cap" value="<?= intval($per_person_weekly_cap) ?>">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Global interviews per week</label>
+          <input class="form-control" type="number" min="1" name="global_cap" value="<?= intval($global_weekly_cap) ?>">
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-primary w-100" type="submit" id="runReportButton">Run Coverage Report</button>
+        </div>
+      </form>
+      <div class="text-center mt-3" id="reportLoadingBar" style="display: none;" role="status" aria-live="polite" aria-label="Running coverage report">
+        <div class="material-progress">
+          <div class="material-progress-bar"></div>
+        </div>
+        <div class="loading-text">Running report...</div>
+      </div>
+      <?php if ($run_report): ?>
+        <div class="jump small mt-3">
+          Jump:
+          <a href="#stats">Stats</a>
+          <a href="#charts">Charts</a>
+          <a href="#matrix">Matrix</a>
+          <a href="#blocked">Blocked Pairs</a>
+        </div>
+      <?php endif; ?>
     </div>
   </div>
+
+  <?php if ($run_report): ?>
 
   <div id="stats" class="row g-3 mb-4">
     <div class="col-lg-3 col-md-6">
@@ -373,27 +521,7 @@ function matrix_color($slots, $max_overlap) {
     </div>
   </div>
 
-  <div class="card mb-4">
-    <div class="card-header">Capacity Controls</div>
-    <div class="card-body">
-      <form method="get" class="row g-3 align-items-end">
-        <div class="col-md-4">
-          <label class="form-label">Interviews per person per week</label>
-          <input class="form-control" type="number" min="1" name="per_person_cap" value="<?= intval($per_person_weekly_cap) ?>">
-        </div>
-        <div class="col-md-4">
-          <label class="form-label">Global interviews per week</label>
-          <input class="form-control" type="number" min="1" name="global_cap" value="<?= intval($global_weekly_cap) ?>">
-        </div>
-        <div class="col-md-4">
-          <button class="btn btn-primary w-100" type="submit">Recalculate</button>
-        </div>
-      </form>
-      <hr>
-      <p class="mb-1"><strong>Members with any path:</strong> <?= intval($members_with_any_path) ?> of <?= intval($members_total) ?></p>
-      <small class="text-muted">A member has a path if they can meet at least one person on the opposite side. It does not mean they can meet everyone.</small>
-    </div>
-  </div>
+  <p class="mb-3"><strong>Members with any path:</strong> <?= intval($members_with_any_path) ?> of <?= intval($members_total) ?> <span class="text-muted">(can meet at least one person on the opposite side)</span></p>
 
   <div id="charts" class="row g-3 mb-4">
     <div class="col-lg-4">
@@ -436,17 +564,27 @@ function matrix_color($slots, $max_overlap) {
               <tr>
                 <th class="row-label-head">Active \ Pledge</th>
                 <?php foreach ($pledges as $p): ?>
-                  <th title="<?= h($p['name']) ?>"><?= h($p['name']) ?></th>
+                  <?php $pledge_unreachable = intval($pledge_unreachable_counts[$p['id']] ?? 0); ?>
+                  <th title="<?= h($p['name']) ?> (cannot meet <?= $pledge_unreachable ?> active<?= $pledge_unreachable === 1 ? '' : 's' ?>)">
+                    <span><?= h($p['name']) ?></span>
+                    <span class="unreachable-pill-col <?= $pledge_unreachable === 0 ? 'good' : 'bad' ?>"><?= $pledge_unreachable ?></span>
+                  </th>
                 <?php endforeach; ?>
               </tr>
             </thead>
             <tbody>
               <?php foreach ($actives as $a): ?>
                 <?php $as = $active_stats[$a['id']]; ?>
+                <?php $active_unreachable = intval($active_unreachable_counts[$a['id']] ?? 0); ?>
                 <tr>
                   <th>
-                    <div><strong><?= h($a['name']) ?></strong></div>
-                    <small class="text-muted"><?= intval($as['partners']) ?> possible pledge partners, <?= intval($as['availability_slots']) ?> availability slots</small>
+                    <div class="matrix-member-meta">
+                      <div class="matrix-name-block">
+                        <div><strong><?= h($a['name']) ?></strong></div>
+                        <small class="text-muted"><?= intval($as['partners']) ?> possible pledge partners, <?= intval($as['availability_slots']) ?> availability slots</small>
+                      </div>
+                      <span class="unreachable-pill <?= $active_unreachable === 0 ? 'good' : 'bad' ?>" title="Cannot meet <?= $active_unreachable ?> pledge<?= $active_unreachable === 1 ? '' : 's' ?>"><?= $active_unreachable ?></span>
+                    </div>
                   </th>
                   <?php foreach ($pledges as $p): ?>
                     <?php
@@ -569,9 +707,25 @@ function matrix_color($slots, $max_overlap) {
       <?php endif; ?>
     </div>
   </div>
+  <?php endif; ?>
 </div>
 
 <script>
+const reportRunForm = document.getElementById('reportRunForm');
+if (reportRunForm) {
+  reportRunForm.addEventListener('submit', () => {
+    const loadingBar = document.getElementById('reportLoadingBar');
+    const runButton = document.getElementById('runReportButton');
+    if (loadingBar) {
+      loadingBar.style.display = 'block';
+    }
+    if (runButton) {
+      runButton.disabled = true;
+      runButton.textContent = 'Running...';
+    }
+  });
+}
+
 const pairMixCtx = document.getElementById('pairMixChart');
 if (pairMixCtx) {
   new Chart(pairMixCtx, {
