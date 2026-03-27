@@ -194,9 +194,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$user_not_found) {
     for ($minutes = 0; $minutes < 660; $minutes += 30): 
       $hour = floor($minutes / 60) + 8;
       $minute = $minutes % 60;
+      $display_start_ts = strtotime(sprintf('2000-01-01 %02d:%02d:00', $hour, $minute));
+      $display_end_ts = strtotime('+30 minutes', $display_start_ts);
     ?>
       <tr>
-        <th><?=sprintf("%d:%02d - %d:%02d", $hour, $minute, $hour + ($minute == 30 ? 1 : 0), ($minute + 30) % 60)?></th>
+        <th><?=date('g:i A', $display_start_ts)?> - <?=date('g:i A', $display_end_ts)?></th>
         <?php for ($d=0; $d<7; $d++):
           $start = strtotime(sprintf("+%d day %d:%02d", $d, $hour, $minute), $base);
           $end = $start + 1800; // 30 minutes = 1800 seconds
