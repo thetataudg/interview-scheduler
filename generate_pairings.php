@@ -270,6 +270,17 @@ function haveMet($active_id, $pledge_id, $completed_pairs, $current_week_pairs) 
     return false;
 }
 
+function userNamesFromIds(array $ids, array $usersById) {
+    $names = [];
+    foreach ($ids as $id) {
+        if (isset($usersById[$id])) {
+            $names[] = $usersById[$id]['name'];
+        }
+    }
+    sort($names, SORT_NATURAL | SORT_FLAG_CASE);
+    return $names;
+}
+
 // Start timing
 $start_time = microtime(true);
 
@@ -550,6 +561,34 @@ if (!empty($pairings)) {
     $used_pledges = 0;
 }
 
+$active_ids_all = array_column($actives, 'id');
+$pledge_ids_all = array_column($pledges, 'id');
+
+$active_ids_with_availability = array_values(array_filter($active_ids_all, fn($id) => isset($availability[$id])));
+$pledge_ids_with_availability = array_values(array_filter($pledge_ids_all, fn($id) => isset($availability[$id])));
+
+$used_active_ids = [];
+$used_pledge_ids = [];
+foreach ($pairings as $pairing) {
+    foreach ($pairing['actives'] as $active) {
+        $used_active_ids[$active['id']] = true;
+    }
+    foreach ($pairing['pledges'] as $pledge) {
+        $used_pledge_ids[$pledge['id']] = true;
+    }
+}
+
+$unused_active_with_availability_ids = array_values(array_diff($active_ids_with_availability, array_keys($used_active_ids)));
+$unused_pledge_with_availability_ids = array_values(array_diff($pledge_ids_with_availability, array_keys($used_pledge_ids)));
+
+$active_no_availability_ids = array_values(array_diff($active_ids_all, $active_ids_with_availability));
+$pledge_no_availability_ids = array_values(array_diff($pledge_ids_all, $pledge_ids_with_availability));
+
+$unused_active_with_availability_names = userNamesFromIds($unused_active_with_availability_ids, $usersById);
+$unused_pledge_with_availability_names = userNamesFromIds($unused_pledge_with_availability_ids, $usersById);
+$active_no_availability_names = userNamesFromIds($active_no_availability_ids, $usersById);
+$pledge_no_availability_names = userNamesFromIds($pledge_no_availability_ids, $usersById);
+
 $debug[] = "Generation completed in {$processing_time}ms";
 $debug[] = "Final results: " . count($pairings) . " interviews scheduled";
 $debug[] = "Individual participation: $used_actives actives used (of $actives_with_availability available), $used_pledges pledges used (of $pledges_with_availability available)";
@@ -593,6 +632,62 @@ if ($is_ajax) {
     </div>
     
     <?php if (!empty($pairings)): ?>
+        <div class="card mb-3">
+            <div class="card-body p-2">
+                <small class="fw-bold d-block mb-2">Participation Report</small>
+                <div class="table-responsive">
+                    <table class="table table-sm table-bordered mb-0">
+                        <thead>
+                            <tr>
+                                <th>Role</th>
+                                <th>Not Used (submitted availability)</th>
+                                <th>No Availability Submitted</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Actives</strong></td>
+                                <td>
+                                    <small>
+                                        <?= count($unused_active_with_availability_names) ?>
+                                        <?php if (!empty($unused_active_with_availability_names)): ?>
+                                            - <?= htmlspecialchars(implode(', ', $unused_active_with_availability_names)) ?>
+                                        <?php endif; ?>
+                                    </small>
+                                </td>
+                                <td>
+                                    <small>
+                                        <?= count($active_no_availability_names) ?>
+                                        <?php if (!empty($active_no_availability_names)): ?>
+                                            - <?= htmlspecialchars(implode(', ', $active_no_availability_names)) ?>
+                                        <?php endif; ?>
+                                    </small>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><strong>Pledges</strong></td>
+                                <td>
+                                    <small>
+                                        <?= count($unused_pledge_with_availability_names) ?>
+                                        <?php if (!empty($unused_pledge_with_availability_names)): ?>
+                                            - <?= htmlspecialchars(implode(', ', $unused_pledge_with_availability_names)) ?>
+                                        <?php endif; ?>
+                                    </small>
+                                </td>
+                                <td>
+                                    <small>
+                                        <?= count($pledge_no_availability_names) ?>
+                                        <?php if (!empty($pledge_no_availability_names)): ?>
+                                            - <?= htmlspecialchars(implode(', ', $pledge_no_availability_names)) ?>
+                                        <?php endif; ?>
+                                    </small>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
         
         <!-- Generation Stats (always visible) -->
         <div class="alert alert-light">
@@ -750,6 +845,63 @@ if ($is_ajax) {
         <!-- Generation Stats (always visible) -->
         <div class="alert alert-light">
             <small>⏱️ Generation Stats: Took <?=$processing_time?>ms to compare <?=count($availability_data)?> availability records | <?=$used_actives?> actives used out of <?=$actives_with_availability?> with availability | <?=$used_pledges?> pledges used out of <?=$pledges_with_availability?> with availability</small>
+        </div>
+
+        <div class="card mb-3">
+            <div class="card-body p-2">
+                <small class="fw-bold d-block mb-2">Participation Report</small>
+                <div class="table-responsive">
+                    <table class="table table-sm table-bordered mb-0">
+                        <thead>
+                            <tr>
+                                <th>Role</th>
+                                <th>Not Used (submitted availability)</th>
+                                <th>No Availability Submitted</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Actives</strong></td>
+                                <td>
+                                    <small>
+                                        <?= count($unused_active_with_availability_names) ?>
+                                        <?php if (!empty($unused_active_with_availability_names)): ?>
+                                            - <?= htmlspecialchars(implode(', ', $unused_active_with_availability_names)) ?>
+                                        <?php endif; ?>
+                                    </small>
+                                </td>
+                                <td>
+                                    <small>
+                                        <?= count($active_no_availability_names) ?>
+                                        <?php if (!empty($active_no_availability_names)): ?>
+                                            - <?= htmlspecialchars(implode(', ', $active_no_availability_names)) ?>
+                                        <?php endif; ?>
+                                    </small>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><strong>Pledges</strong></td>
+                                <td>
+                                    <small>
+                                        <?= count($unused_pledge_with_availability_names) ?>
+                                        <?php if (!empty($unused_pledge_with_availability_names)): ?>
+                                            - <?= htmlspecialchars(implode(', ', $unused_pledge_with_availability_names)) ?>
+                                        <?php endif; ?>
+                                    </small>
+                                </td>
+                                <td>
+                                    <small>
+                                        <?= count($pledge_no_availability_names) ?>
+                                        <?php if (!empty($pledge_no_availability_names)): ?>
+                                            - <?= htmlspecialchars(implode(', ', $pledge_no_availability_names)) ?>
+                                        <?php endif; ?>
+                                    </small>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <div class="alert alert-success">

@@ -8,7 +8,7 @@ $week = $_GET['week'] ?? 'next'; // 'current' or 'next'
 $stmt = $db->prepare("SELECT name FROM users WHERE id = ?");
 $stmt->execute([$user_id]);
 $user_name = $stmt->fetchColumn();
-if (!$user_name) $user_name = "Unknown User";
+$user_not_found = !$user_name;
 
 // Generate slots based on selected week
 if ($week === 'current') {
@@ -28,7 +28,7 @@ $existing = $avail_stmt->fetchAll(PDO::FETCH_COLUMN);
 $existing = array_map('strtotime', $existing);
 
 // Handle form post
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$user_not_found) {
     $week_param = $_POST['week'] ?? 'next';
     // Delete only the availability for the selected week
     $delete_stmt = $db->prepare("DELETE FROM availabilities WHERE user_id=? AND date(slot_start) BETWEEN ? AND ?");
@@ -43,6 +43,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     header("Location: availability.php?user_id=$user_id&week=$week_param&saved=1");
     exit;
+  } elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && $user_not_found) {
+    $error_message = "User not found. Availability cannot be set.";
 }
 ?>
 
@@ -140,12 +142,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </nav>
 
 <div class="container py-2">
-<h2>Set Availability for <?= htmlspecialchars($user_name) ?> - <?= $week_label ?></h2>
+<?php if ($user_not_found): ?>
+  <h2>Set Availability</h2>
+  <br />
+  <div class="alert alert-danger" role="alert">
+    Invalid user
+  </div>
+<?php else: ?>
+  <h2>Set Availability for <?= htmlspecialchars($user_name) ?> - <?= $week_label ?></h2>
+<?php endif; ?>
 <br />
 <?php if (isset($_GET['saved'])): ?>
   <div class="alert alert-success">Availability saved for <?= $week_label ?>!</div>
 <?php endif; ?>
+<?php if (!empty($error_message)): ?>
+  <div class="alert alert-danger" role="alert"><?= htmlspecialchars($error_message) ?></div>
+<?php endif; ?>
 
+<?php if (!$user_not_found): ?>
 <!-- Week Selector -->
 <div class="mb-3">
   <div class="btn-group" role="group" aria-label="Week selector">
@@ -214,6 +228,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   </table>
   <button class="btn btn-primary">Save Availability</button>
 </form>
+<?php endif; ?>
 
 <script>
 // Enhanced drag selection functionality

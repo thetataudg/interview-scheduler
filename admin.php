@@ -96,25 +96,45 @@ $current_avail_stmt = $db->prepare("SELECT DISTINCT user_id FROM availabilities 
 $current_avail_stmt->execute([$current_week_start, $current_week_end]);
 $current_avail_users = array_flip($current_avail_stmt->fetchAll(PDO::FETCH_COLUMN));
 
+$current_count_stmt = $db->prepare("SELECT user_id, COUNT(*) AS slot_count FROM availabilities WHERE date(slot_start) BETWEEN ? AND ? GROUP BY user_id");
+$current_count_stmt->execute([$current_week_start, $current_week_end]);
+$current_slot_counts = [];
+foreach ($current_count_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+  $current_slot_counts[$row['user_id']] = (int)$row['slot_count'];
+}
+
 // Get next week availability
 $next_avail_stmt = $db->prepare("SELECT DISTINCT user_id FROM availabilities WHERE date(slot_start) BETWEEN ? AND ?");
 $next_avail_stmt->execute([$next_week_start, $next_week_end]);
 $next_avail_users = array_flip($next_avail_stmt->fetchAll(PDO::FETCH_COLUMN));
 
+$next_count_stmt = $db->prepare("SELECT user_id, COUNT(*) AS slot_count FROM availabilities WHERE date(slot_start) BETWEEN ? AND ? GROUP BY user_id");
+$next_count_stmt->execute([$next_week_start, $next_week_end]);
+$next_slot_counts = [];
+foreach ($next_count_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+  $next_slot_counts[$row['user_id']] = (int)$row['slot_count'];
+}
+
 // Helper function to determine availability badge
-function getAvailabilityBadge($user_id, $current_avail, $next_avail) {
+function getAvailabilityBadge($user_id, $current_avail, $next_avail, $current_slot_counts, $next_slot_counts) {
     $has_current = isset($current_avail[$user_id]);
     $has_next = isset($next_avail[$user_id]);
+  $current_slots = $current_slot_counts[$user_id] ?? 0;
+  $next_slots = $next_slot_counts[$user_id] ?? 0;
     
     if ($has_current && $has_next) {
-        return '<span class="badge bg-success ms-2"><i class="fas fa-check"></i> Both Weeks</span>';
+    $status_badge = '<span class="badge bg-success ms-2"><i class="fas fa-check"></i> Both Weeks</span>';
     } elseif ($has_current && !$has_next) {
-        return '<span class="badge bg-success ms-2"><i class="fas fa-check"></i> Current Only</span>';
+    $status_badge = '<span class="badge bg-success ms-2"><i class="fas fa-check"></i> Current Only</span>';
     } elseif (!$has_current && $has_next) {
-        return '<span class="badge bg-info ms-2"><i class="fas fa-exclamation-triangle"></i> Next Only</span>';
+    $status_badge = '<span class="badge bg-info ms-2"><i class="fas fa-exclamation-triangle"></i> Next Only</span>';
     } else {
-        return '<span class="badge bg-warning text-dark ms-2"><i class="fas fa-times"></i> Missing Both</span>';
+    $status_badge = '<span class="badge bg-warning text-dark ms-2"><i class="fas fa-times"></i> Missing Both</span>';
     }
+
+  $count_badge = '<span class="badge bg-secondary ms-1" title="Availability slots by week">' . $current_slots . ' / ' . $next_slots . '</span>';
+
+  return $status_badge . $count_badge;
 }
 
 // Handle logging completed interviews
@@ -440,8 +460,11 @@ if (isset($_SESSION['csv_upload_report'])) {
       <a href="manage_users.php" class="btn btn-primary me-2">
         <i class="fas fa-users"></i> Manage Users
       </a>
-      <a href="availability_manager.php" class="btn btn-outline-primary">
+      <a href="availability_manager.php" class="btn btn-outline-primary me-2">
         <i class="fas fa-calendar-alt"></i> Availability Manager
+      </a>
+      <a href="coverage_report.php" class="btn btn-outline-dark">
+        <i class="fas fa-chart-network"></i> Coverage Report
       </a>
     </div>
   </div>
@@ -545,7 +568,7 @@ if (isset($_SESSION['csv_upload_report'])) {
                 <?=htmlspecialchars($a['name'])?>
               <?php endif; ?>
             </a>
-            <?= getAvailabilityBadge($a['id'], $current_avail_users, $next_avail_users) ?>
+            <?= getAvailabilityBadge($a['id'], $current_avail_users, $next_avail_users, $current_slot_counts, $next_slot_counts) ?>
           </li>
         <?php endforeach; ?>
       </ul>
@@ -561,7 +584,7 @@ if (isset($_SESSION['csv_upload_report'])) {
                 <?=htmlspecialchars($p['name'])?>
               <?php endif; ?>
             </a>
-            <?= getAvailabilityBadge($p['id'], $current_avail_users, $next_avail_users) ?>
+            <?= getAvailabilityBadge($p['id'], $current_avail_users, $next_avail_users, $current_slot_counts, $next_slot_counts) ?>
           </li>
         <?php endforeach; ?>
       </ul>
