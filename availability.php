@@ -4,11 +4,13 @@ require 'config.php';
 $user_id = $_GET['user_id'] ?? 1; // stub user
 $week = $_GET['week'] ?? 'next'; // 'current' or 'next'
 
-// Fetch the user name
-$stmt = $db->prepare("SELECT name FROM users WHERE id = ?");
+// Fetch user details
+$stmt = $db->prepare("SELECT id, name, role FROM users WHERE id = ?");
 $stmt->execute([$user_id]);
-$user_name = $stmt->fetchColumn();
-$user_not_found = !$user_name;
+$user = $stmt->fetch(PDO::FETCH_ASSOC);
+$user_not_found = !$user;
+$user_name = $user['name'] ?? null;
+$user_role = $user['role'] ?? null;
 
 // Generate slots based on selected week
 if ($week === 'current') {
@@ -26,6 +28,47 @@ $avail_stmt = $db->prepare("SELECT slot_start FROM availabilities WHERE user_id=
 $avail_stmt->execute([$user_id, $week_start, $week_end]);
 $existing = $avail_stmt->fetchAll(PDO::FETCH_COLUMN);
 $existing = array_map('strtotime', $existing);
+
+$counterpart_users = [];
+$overlap_slots_by_counterpart = [];
+$completed_pair_map = [];
+$counterpart_week_slot_counts = [];
+
+if (!$user_not_found) {
+  $counterpart_role = $user_role === 'active' ? 'pledge' : 'active';
+
+  $counterpart_stmt = $db->prepare("SELECT id, name FROM users WHERE role = ? AND COALESCE(exclude_from_pairings, 0) = 0 ORDER BY name");
+  $counterpart_stmt->execute([$counterpart_role]);
+  $counterpart_users = $counterpart_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+  $counterpart_avail_stmt = $db->prepare("\n            SELECT a.user_id AS counterpart_id, COUNT(*) AS slot_count\n            FROM availabilities a\n            JOIN users u ON u.id = a.user_id\n                AND u.role = ?\n                AND COALESCE(u.exclude_from_pairings, 0) = 0\n            WHERE date(a.slot_start) BETWEEN ? AND ?\n            GROUP BY a.user_id\n        ");
+  $counterpart_avail_stmt->execute([$counterpart_role, $week_start, $week_end]);
+  foreach ($counterpart_avail_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    $counterpart_week_slot_counts[intval($row['counterpart_id'])] = intval($row['slot_count']);
+  }
+
+  if ($user_role === 'active') {
+    $overlap_stmt = $db->prepare("\n            SELECT a2.user_id AS counterpart_id, COUNT(DISTINCT datetime(a1.slot_start)) AS overlap_slots\n            FROM availabilities a1\n            JOIN availabilities a2 ON datetime(a1.slot_start) = datetime(a2.slot_start)\n            JOIN users u2 ON u2.id = a2.user_id\n                AND u2.role = 'pledge'\n                AND COALESCE(u2.exclude_from_pairings, 0) = 0\n            WHERE a1.user_id = ?\n              AND date(a1.slot_start) BETWEEN ? AND ?\n              AND date(a2.slot_start) BETWEEN ? AND ?\n            GROUP BY a2.user_id\n        ");
+    $overlap_stmt->execute([$user_id, $week_start, $week_end, $week_start, $week_end]);
+
+    $completed_stmt = $db->prepare("SELECT pledge_id AS counterpart_id FROM completed_interviews WHERE active_id = ?");
+    $completed_stmt->execute([$user_id]);
+  } else {
+    $overlap_stmt = $db->prepare("\n            SELECT a2.user_id AS counterpart_id, COUNT(DISTINCT datetime(a1.slot_start)) AS overlap_slots\n            FROM availabilities a1\n            JOIN availabilities a2 ON datetime(a1.slot_start) = datetime(a2.slot_start)\n            JOIN users u2 ON u2.id = a2.user_id\n                AND u2.role = 'active'\n                AND COALESCE(u2.exclude_from_pairings, 0) = 0\n            WHERE a1.user_id = ?\n              AND date(a1.slot_start) BETWEEN ? AND ?\n              AND date(a2.slot_start) BETWEEN ? AND ?\n            GROUP BY a2.user_id\n        ");
+    $overlap_stmt->execute([$user_id, $week_start, $week_end, $week_start, $week_end]);
+
+    $completed_stmt = $db->prepare("SELECT active_id AS counterpart_id FROM completed_interviews WHERE pledge_id = ?");
+    $completed_stmt->execute([$user_id]);
+  }
+
+  foreach ($overlap_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    $overlap_slots_by_counterpart[intval($row['counterpart_id'])] = intval($row['overlap_slots']);
+  }
+
+  foreach ($completed_stmt->fetchAll(PDO::FETCH_COLUMN) as $counterpart_id) {
+    $completed_pair_map[intval($counterpart_id)] = true;
+  }
+}
 
 // Handle form post
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$user_not_found) {
@@ -126,6 +169,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$user_not_found) {
       position: relative;
       min-height: 45px;
     }
+
+    .mini-matrix-cell {
+      font-weight: 600;
+      text-align: center;
+      min-width: 120px;
+    }
+    .mini-matrix-table td.mini-status-completed {
+      background-color: #166534 !important;
+      box-shadow: inset 0 0 0 9999px #166534 !important;
+      color: #fff !important;
+    }
+    .mini-matrix-table td.mini-status-possible {
+      background-color: #d1e7dd !important;
+      box-shadow: inset 0 0 0 9999px #d1e7dd !important;
+      color: #0f5132 !important;
+    }
+    .mini-matrix-table td.mini-status-fragile {
+      background-color: #fff3cd !important;
+      box-shadow: inset 0 0 0 9999px #fff3cd !important;
+      color: #664d03 !important;
+    }
+    .mini-matrix-table td.mini-status-impossible {
+      background-color: #f8d7da !important;
+      box-shadow: inset 0 0 0 9999px #f8d7da !important;
+      color: #842029 !important;
+    }
+    .mini-matrix-table td.mini-status-awaiting {
+      background-color: #e9ecef !important;
+      box-shadow: inset 0 0 0 9999px #e9ecef !important;
+      color: #495057 !important;
+    }
+    .mini-matrix-wrap {
+      overflow-x: auto;
+    }
+    .mini-matrix-table th,
+    .mini-matrix-table td {
+      white-space: nowrap;
+      text-align: center;
+      vertical-align: middle;
+    }
+    .mini-matrix-table thead th {
+      background: #0f172a;
+      color: #fff;
+      font-size: 0.8rem;
+      min-width: 120px;
+    }
+    .mini-matrix-legend {
+      font-size: 0.85rem;
+    }
+    .mini-legend-dot {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      border-radius: 2px;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .matrix-dropdown > summary {
+      cursor: pointer;
+      list-style: none;
+    }
+    .matrix-dropdown > summary::-webkit-details-marker {
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -178,6 +285,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$user_not_found) {
     </a>
   </div>
 </div>
+
+<?php
+$counterpart_label = $user_role === 'active' ? 'PNM' : 'Active';
+$counterpart_label_plural = $counterpart_label . 's';
+$has_week_availability = !empty($existing);
+?>
+
+<details class="card mb-3 matrix-dropdown">
+  <summary class="card-header d-flex justify-content-between align-items-center">
+    <span>Coverage Matrix: <?= htmlspecialchars($counterpart_label_plural) ?> You Can Meet (<?= htmlspecialchars($week_label) ?>)</span>
+    <span class="text-primary small">Toggle Matrix</span>
+  </summary>
+  <div class="card-body p-0">
+    <?php if (!$has_week_availability): ?>
+      <div class="p-3 text-muted">Awaiting user availability for this week.</div>
+    <?php elseif (empty($counterpart_users)): ?>
+      <div class="p-3 text-muted">No <?= strtolower($counterpart_label_plural) ?> found.</div>
+    <?php else: ?>
+      <div class="mini-matrix-legend px-3 pt-3 pb-2">
+        <span class="me-3"><span class="mini-legend-dot" style="background:#166534"></span>Interviewed</span>
+        <span class="me-3"><span class="mini-legend-dot" style="background:#d1e7dd"></span>Possible (2+ slots overlap)</span>
+        <span class="me-3"><span class="mini-legend-dot" style="background:#fff3cd"></span>Fragile (1 slot overlap)</span>
+        <span class="me-3"><span class="mini-legend-dot" style="background:#e9ecef"></span>Awaiting User Availability</span>
+        <span><span class="mini-legend-dot" style="background:#f8d7da"></span>Pairing Impossible</span>
+      </div>
+      <div class="mini-matrix-wrap px-3 pb-3">
+        <table class="table table-sm table-bordered mb-0 mini-matrix-table align-middle">
+          <thead>
+            <tr>
+              <?php foreach ($counterpart_users as $cu): ?>
+                <th title="<?= htmlspecialchars($counterpart_label) ?>: <?= htmlspecialchars($cu['name']) ?>"><?= htmlspecialchars($cu['name']) ?></th>
+              <?php endforeach; ?>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <?php foreach ($counterpart_users as $cu):
+                $cid = intval($cu['id']);
+                $overlap_slots = intval($overlap_slots_by_counterpart[$cid] ?? 0);
+                $is_completed = isset($completed_pair_map[$cid]);
+                $counterpart_slots = intval($counterpart_week_slot_counts[$cid] ?? 0);
+
+                if ($is_completed) {
+                  $status_class = 'mini-status-completed';
+                  $status_text = '✓';
+                  $status_title = 'Already Interviewed';
+                } elseif ($counterpart_slots === 0) {
+                  $status_class = 'mini-status-awaiting';
+                  $status_text = '?';
+                  $status_title = 'Awaiting counterpart availability';
+                } elseif ($overlap_slots >= 2) {
+                  $status_class = 'mini-status-possible';
+                  $status_text = 'P';
+                  $status_title = 'Possible to interview';
+                } elseif ($overlap_slots === 1) {
+                  $status_class = 'mini-status-fragile';
+                  $status_text = 'F';
+                  $status_title = 'Fragile match';
+                } else {
+                  $status_class = 'mini-status-impossible';
+                  $status_text = 'X';
+                  $status_title = 'Impossible to interview';
+                }
+              ?>
+                <td class="mini-matrix-cell <?= $status_class ?>" title="<?= htmlspecialchars($status_title) ?>"><?= htmlspecialchars($status_text) ?></td>
+              <?php endforeach; ?>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    <?php endif; ?>
+  </div>
+</details>
 
 <form method="post" id="availabilityForm">
   <input type="hidden" name="week" value="<?= htmlspecialchars($week) ?>">
